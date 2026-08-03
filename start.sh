@@ -13,6 +13,12 @@ MODEL_ID="mlx-community/Qwen3.6-27B-4bit"
 # Multi-token-prediction speculative-decoding drafter for the model above.
 # It has no standalone language_model head, so it must be passed as
 # --draft-model, never requested directly as a chat "model".
+# Measured ~1.45-1.6x decode speedup at 2.24 accepted tokens/round; the
+# drafter itself costs only ~9% of a round — the rest is the 3-token verify
+# forward. Do not add --draft-block-size: the sweep (research/mtp-overhead)
+# showed the configured depth 3 is optimal (2/4/5/6 are all slower) and the
+# adaptive controller already handles bursts. Per-request acceptance shows
+# up in the log as "Speculative decode: ... accepted_tokens_per_round=".
 DRAFT_MODEL_ID="mlx-community/Qwen3.6-27B-MTP-4bit"
 
 # The model is already downloaded into a Hugging Face hub-style cache dir

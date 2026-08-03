@@ -1438,6 +1438,52 @@ class ResponseGenerator:
             )
         return now
 
+    def _log_speculative_stats(self, request_id) -> None:
+        """Log drafter acceptance stats for the batch a request finished in.
+
+        The drafter resets its counters when a batch's decode rounds start,
+        so at finish time they cover the current batch. An "engaged=no" line
+        means the drafter loaded but no speculative rounds ran.
+        """
+        drafter = self.draft_model
+        if drafter is None:
+            return
+        accept_lens = list(getattr(drafter, "accept_lens", None) or [])
+        if not accept_lens:
+            logger.info(
+                "Speculative decode: request=%s kind=%s engaged=no "
+                "(no draft rounds recorded)",
+                request_id,
+                self.draft_kind,
+            )
+            return
+        rounds = len(accept_lens)
+        accepted = sum(accept_lens)
+        # Each round emits the accepted draft tokens plus one bonus token
+        # from the target's verify pass.
+        tokens_per_round = (accepted + rounds) / rounds
+        draft_lens = list(getattr(drafter, "draft_lens", None) or [])
+        if len(draft_lens) == rounds and sum(draft_lens) > 0:
+            accept_rate = 100.0 * accepted / sum(draft_lens)
+            logger.info(
+                "Speculative decode: request=%s kind=%s rounds=%d "
+                "accepted_tokens_per_round=%.2f accept_rate=%.1f%%",
+                request_id,
+                self.draft_kind,
+                rounds,
+                tokens_per_round,
+                accept_rate,
+            )
+        else:
+            logger.info(
+                "Speculative decode: request=%s kind=%s rounds=%d "
+                "accepted_tokens_per_round=%.2f",
+                request_id,
+                self.draft_kind,
+                rounds,
+                tokens_per_round,
+            )
+
     def _make_sampler(self, args: GenerationArguments) -> Optional[Callable]:
         if args.temperature == 0:
             return None
@@ -2296,6 +2342,7 @@ class ResponseGenerator:
             if r.finish_reason is not None:
                 rqueue.put(None)
                 del active[r.uid]
+                self._log_speculative_stats(info.get("request_id", r.uid))
 
     def _stream_text(self, info: dict, token: int, finish_reason: Optional[str]) -> str:
         """Convert one generated token into a streaming text segment."""
