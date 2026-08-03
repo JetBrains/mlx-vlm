@@ -6,11 +6,14 @@ replaces the 4-bit quantized matmul with an int8 x int8 -> int32 GEMM running
 on the M5 GPU neural accelerators via Metal Performance Primitives tensor ops:
 
   - activations: per-token (per-row) dynamic symmetric int8, custom kernel
-  - weights: per-output-channel symmetric int8, derived lazily by
-    dequantizing the resident 4-bit weights (~24 GB extra at scope=all for
-    Qwen3.6-27B) and EVICTED after TTL_S seconds without a prefill-sized
-    call, so with APC session reuse the memory cost is transient: it is paid
-    only around cold prefills, not while the server sits warm
+  - weights: per-output-channel symmetric int8, produced by a fused Metal
+    kernel straight from the resident packed 4-bit weights (no bf16
+    intermediate). By default (MLX_VLM_INT8_CACHE=none) each layer's int8
+    tensor is built per prefill call and freed by the MLX executor right
+    after its GEMM consumes it, so peak extra memory is a few hundred MB
+    (one layer), not the ~24 GB of a full copy. MLX_VLM_INT8_CACHE=ttl
+    instead caches all copies and evicts them after MLX_VLM_INT8_TTL_S idle.
+    Only the per-channel scales (~10 MB total) are kept permanently.
   - accumulation int32, scales applied in-register, bf16 output
 
 Decode-sized calls (rows < ROW_THRESHOLD) keep the 4-bit quantized kernels,
@@ -56,12 +59,15 @@ MLP_SHAPES = {(17408, 5120), (5120, 17408)}
 MAX_OUT = 32768
 MIN_DIM = 1024
 
-# The int8 weight copies cost ~24 GB (scope=all) but only earn their keep
-# during prefill-sized calls -- with APC session reuse those are rare (cold
-# prefills). Evict them after this many seconds without an int8-path call and
-# rebuild lazily on the next cold prefill (a few seconds, amortized over the
-# prefill's first chunk). 0 disables eviction (weights kept for the server
-# lifetime, the pre-TTL behavior).
+# int8 weight-copy lifecycle (env MLX_VLM_INT8_CACHE):
+#   "none" (default): build each layer's int8 tensor per prefill call with
+#       the fused requant kernel and let the MLX executor free it after its
+#       GEMM. Peak extra memory ~ one layer; the rebuild is cheap (packed
+#       4-bit read + int8 write, no bf16 intermediate), and with a large
+#       --prefill-step-size it costs a few percent of chunk compute.
+#   "ttl": cache all copies (~24 GB at scope=all) and evict after TTL_S
+#       seconds without an int8-path call; fastest, highest peak memory.
+CACHE = os.environ.get("MLX_VLM_INT8_CACHE", "none")
 TTL_S = float(os.environ.get("MLX_VLM_INT8_TTL_S", "120"))
 
 _HEADER = """
@@ -159,9 +165,41 @@ _GEMM_SRC = """
     }}
 """
 
+# Fused requantization: packed affine-4bit (group_size 64) -> per-channel
+# symmetric int8, one pass, no bf16 intermediate. One threadgroup (256
+# threads) per output channel; each uint32 word holds 8 nibbles, and a
+# 64-value group spans exactly 8 words, so a word never crosses groups.
+_REQUANT_SRC = """
+    constexpr int KW = {KW};   // packed words per row (K / 8)
+
+    uint row = threadgroup_position_in_grid.x;
+    uint tid = thread_position_in_threadgroup.x;
+
+    const device uint32_t* prow = packed + size_t(row) * KW;
+    const device {T}* srow = scales + size_t(row) * (KW / 8);
+    const device {T}* brow = biases + size_t(row) * (KW / 8);
+    device int8_t* orow = out + size_t(row) * KW * 8;
+
+    float inv = 1.0f / ws[row];
+
+    for (int i = tid; i < KW; i += 256) {{
+        uint32_t wrd = prow[i];
+        int g = i / 8;
+        float s = float(srow[g]);
+        float b = float(brow[g]);
+        device int8_t* o = orow + i * 8;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {{
+            float v = float((wrd >> (4 * j)) & 0xF) * s + b;
+            o[j] = int8_t(clamp(rint(v * inv), -127.0f, 127.0f));
+        }}
+    }}
+"""
+
 _TM, _TN, _NSIMD = 128, 128, 8
 _quant_kernels = {}
 _gemm_kernels = {}
+_requant_kernels = {}
 # id(module) -> (wq int8 [N,K], ws fp32 [N]); modules live for server
 # lifetime, entries are evicted after TTL_S idle (see _reaper).
 _int8_weights = {}
@@ -253,29 +291,67 @@ def _int8_gemm(xq, xs, wq, ws, bias=None):
     )[0]
 
 
+# id(module) -> ws fp32 [N]; tiny (~10 MB total), kept for server lifetime.
+_ws_cache = {}
+
+
+def _ws_for(m: nn.Module):
+    """Per-channel int8 scale: an upper bound on |w| per output channel,
+    computed from the affine group scales/biases alone (no dequantization).
+    Within a group max|w| <= max(|bias|, |15*scale + bias|); slightly coarser
+    than the exact absmax, but safe and essentially free to compute."""
+    ws = _ws_cache.get(id(m))
+    if ws is None:
+        s = m["scales"].astype(mx.float32)
+        b = m["biases"].astype(mx.float32)
+        bound = mx.maximum(mx.abs(b), mx.abs(15.0 * s + b))
+        ws = mx.maximum(bound.max(axis=1), 1e-8) / 127.0
+        mx.eval(ws)
+        _ws_cache[id(m)] = ws
+    return ws
+
+
+def _requant(m: nn.Module, ws):
+    """int8 [N, K] weights from the resident packed 4-bit tensor, fused."""
+    w = m["weight"]  # uint32 [N, K/8]
+    N, KW = w.shape
+    tname = {mx.bfloat16: "bfloat", mx.float16: "half", mx.float32: "float"}[
+        m["scales"].dtype
+    ]
+    key = (KW, tname)
+    if key not in _requant_kernels:
+        _requant_kernels[key] = mx.fast.metal_kernel(
+            name=f"i8p_requant_{KW}_{tname}",
+            input_names=["packed", "scales", "biases", "ws"],
+            output_names=["out"],
+            header=_HEADER,
+            source=_REQUANT_SRC.format(KW=KW, T=tname),
+        )
+    return _requant_kernels[key](
+        inputs=[w, m["scales"], m["biases"], ws],
+        grid=(N * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(N, KW * 8)],
+        output_dtypes=[mx.int8],
+    )[0]
+
+
 def _weights_for(m: nn.Module):
-    """Per-output-channel int8 weights for a QuantizedLinear (built lazily,
-    evicted after TTL_S idle)."""
+    """(wq int8 [N,K], ws fp32 [N]) for a QuantizedLinear.
+
+    CACHE="none": wq is rebuilt per call by the fused kernel and freed by
+    the MLX executor once its GEMM has consumed it (peak ~ one layer).
+    CACHE="ttl": wq is cached and evicted after TTL_S idle.
+    """
+    ws = _ws_for(m)
+    if CACHE != "ttl":
+        return _requant(m, ws), ws
     _touch()
     with _weights_lock:
         entry = _int8_weights.get(id(m))
         if entry is None:
-            w = mx.dequantize(
-                m["weight"],
-                m["scales"],
-                m.get("biases"),
-                group_size=m.group_size,
-                bits=m.bits,
-                mode=getattr(m, "mode", "affine"),
-            )
-            ws = (
-                mx.maximum(mx.abs(w).max(axis=1), 1e-8).astype(mx.float32)
-                / 127.0
-            )
-            wq = mx.clip(
-                mx.round(w.astype(mx.float32) / ws[:, None]), -127, 127
-            ).astype(mx.int8)
-            mx.eval(wq, ws)
+            wq = _requant(m, ws)
+            mx.eval(wq)
             entry = (wq, ws)
             _int8_weights[id(m)] = entry
     return entry
@@ -284,6 +360,14 @@ def _weights_for(m: nn.Module):
 def _eligible(m: nn.Module, k_dim: int) -> bool:
     n = m["weight"].shape[0]
     if n % _TN or k_dim % 32:
+        return False
+    # The fused requant kernel assumes the standard mlx-community layout.
+    if (
+        m.bits != 4
+        or m.group_size != 64
+        or getattr(m, "mode", "affine") != "affine"
+        or "biases" not in m
+    ):
         return False
     if SCOPE == "mlp":
         return (n, k_dim) in MLP_SHAPES
@@ -326,24 +410,30 @@ def apply():
         return y.reshape(*x.shape[:-1], wq.shape[0])
 
     nn.QuantizedLinear.__call__ = ql_call
-    _start_reaper()
+    if CACHE == "ttl":
+        _start_reaper()
     logger.info(
         "int8 NAX prefill patch applied (row threshold %d, scope %s, "
-        "weight-cache TTL %.0fs)",
+        "weight cache %s%s)",
         ROW_THRESHOLD,
         SCOPE,
-        TTL_S,
+        CACHE,
+        f", TTL {TTL_S:.0f}s" if CACHE == "ttl" else "",
     )
 
 
 def warmup(model: nn.Module):
-    """Pre-build int8 weights for all eligible modules (optional)."""
+    """Pre-build per-channel scales (and, with CACHE=ttl, the int8 weights)
+    for all eligible modules (optional)."""
     count = 0
     for _, m in model.named_modules():
         if isinstance(m, nn.QuantizedLinear):
             n, kp = m["weight"].shape
             k = kp * 32 // m.bits
             if _eligible(m, k):
-                _weights_for(m)
+                if CACHE == "ttl":
+                    _weights_for(m)
+                else:
+                    _ws_for(m)
                 count += 1
-    logger.info("int8 NAX prefill: %d modules pre-quantized", count)
+    logger.info("int8 NAX prefill: %d modules prepared (cache=%s)", count, CACHE)

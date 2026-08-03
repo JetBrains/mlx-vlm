@@ -298,28 +298,41 @@ Second A/B (scope=all, 96-token greedy generations):
 If a quality eval on real workloads flags scope=all, set
 `MLX_VLM_INT8_SCOPE=mlp` (attention numerics then stay untouched).
 
-**Memory (updated 2026-08-04): int8 weight copies are now TTL-evicted.**
-The ~24 GB of int8 copies (scope=all) only earn their keep during
-prefill-sized calls, and with APC session reuse those are rare (cold
-prefills; warm suffixes are usually < ROW_THRESHOLD). The cache is therefore
-dropped after `MLX_VLM_INT8_TTL_S` (default 120 s) without an int8-path call,
-via a daemon reaper thread that also calls `mx.clear_cache()`. Measured on
-the real model: 17.1 GB baseline → 39.8 GB during prefill bursts → back to
-17.1 GB after eviction. Rebuild is lazy and costs ~2.6 s total (measured via
-`warmup()`), i.e. ~3 s added to the first cold prefill after an idle period —
-against cold prefills that take tens of seconds. Set `MLX_VLM_INT8_TTL_S=0`
-to keep weights resident forever (pre-TTL behavior).
+**Memory (updated 2026-08-04, v2): per-layer build + free, no resident copy.**
+The ~24 GB of int8 copies only earned their keep on cold prefills (APC warm
+suffixes fall under ROW_THRESHOLD), and even TTL eviction (first fix, still
+available as `MLX_VLM_INT8_CACHE=ttl` + `MLX_VLM_INT8_TTL_S`) left a 24 GB
+*peak* during prefill bursts. The default is now `MLX_VLM_INT8_CACHE=none`:
+
+- A **fused requant kernel** converts the resident packed 4-bit weights
+  straight to int8 (no bf16 intermediate): 0.4–0.7 ms per layer, ~0.2 s per
+  full-model pass, 13x faster than the old mx-op chain. Per-channel scales
+  come from a closed-form bound over the affine group scales/biases
+  (max(|b|, |15s+b|) — exact in practice, ~10 MB kept permanently).
+- Each layer's int8 tensor is built per prefill call and **freed by the MLX
+  executor right after its GEMM consumes it**. Measured peak during a 12.6k
+  prefill: 21.8 GB vs 21.6 GB baseline (+0.2 GB, vs +24 GB before).
+- The per-chunk rebuild (~0.2 s) is amortized with a larger
+  `--prefill-step-size`. Measured (12.6k prompt, cache=none): step 2048
+  ~930 tok/s @ 21.8 GB peak; **step 4096 ~1000 tok/s @ 24.8 GB peak (chosen
+  default in start.sh)**; step 8192 ~960 tok/s @ 28.9 GB. Note the extra
+  peak at larger steps is activation buffers (baseline shows it too), and
+  plain-baseline prefill actually *degrades* with larger steps (763→681),
+  so 4096 is int8-specific tuning.
+
+Net vs the ttl cache: ~5% prefill throughput for −17 GB peak memory.
 
 **Remaining levers:**
 1. Zero-copy variant: dequantize affine-4bit → int8 *inside* the GEMM's
    B-tile loader (threadgroup-staged tensor for matmul2d's right operand).
-   Eliminates the 24 GB cache and the rebuild cost entirely, and halves B
-   read bandwidth; needs kernel work + benchmarking (risk: falls off the
-   91-TOPS pace the same way qmm's in-kernel dequant costs ~8%).
-2. Larger `--prefill-step-size` (bigger M amortizes better on all paths).
-3. Requantize int8 weights from the original bf16 checkpoint instead of the
-   4-bit conversion (removes stacked quantization error; needs ~55 GB download).
-4. Row-quant kernel is ~78 GB/s effective; could be faster, but it's only ~7%
+   Removes even the per-chunk requant pass and halves B read bandwidth;
+   needs kernel work + benchmarking (risk: falls off the 91-TOPS pace the
+   same way qmm's in-kernel dequant costs ~8%).
+2. Requantize int8 weights from the original bf16 checkpoint instead of the
+   4-bit conversion (removes stacked quantization error; needs ~55 GB
+   download) — with cache=none this would need the bf16-derived int8 stored
+   as a sidecar, so it pairs with the ttl mode instead.
+3. Row-quant kernel is ~78 GB/s effective; could be faster, but it's only ~7%
    of the GEMM pipeline.
 
 ## 8. Files in this directory

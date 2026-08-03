@@ -45,10 +45,14 @@ export APC_ENABLED=1
 export APC_EXACT_SESSIONS=2        # concurrent conversations kept warm
 export APC_SESSION_CHECKPOINTS=8   # resumable positions per conversation
 
-# W8A8 int8 prefill on the M5 neural accelerators (+30-47% prefill measured,
-# decode untouched -- see research/int8-nax/README.md). If a quality issue
-# shows up on real workloads, first try MLX_VLM_INT8_SCOPE=mlp (keeps
-# attention numerics untouched), then drop --int8-prefill entirely.
+# W8A8 int8 prefill on the M5 neural accelerators (see
+# research/int8-nax/README.md). int8 weight tensors are built per layer by a
+# fused kernel and freed right after use (MLX_VLM_INT8_CACHE=none default),
+# so peak memory overhead is ~one layer, not a 24 GB copy; the larger
+# prefill step amortizes the per-chunk rebuild (4096 measured best:
+# ~1000 tok/s at 24.8 GB peak on a 12.6k prompt). If a quality issue shows
+# up on real workloads, first try MLX_VLM_INT8_SCOPE=mlp (keeps attention
+# numerics untouched), then drop --int8-prefill entirely.
 exec "$PYTHON_BIN" -m mlx_vlm.server \
   --host 0.0.0.0 \
   --port "$PORT" \
@@ -56,4 +60,5 @@ exec "$PYTHON_BIN" -m mlx_vlm.server \
   --draft-model "$DRAFT_MODEL_ID" \
   --draft-kind mtp \
   --int8-prefill \
+  --prefill-step-size 4096 \
   --preserve-thinking
