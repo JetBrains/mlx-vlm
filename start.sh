@@ -31,6 +31,10 @@ if [ ! -x "$PYTHON_BIN" ]; then
   PYTHON_BIN="python3"
 fi
 
+# W8A8 int8 prefill on the M5 neural accelerators (+30-47% prefill measured,
+# decode untouched -- see research/int8-nax/README.md). If a quality issue
+# shows up on real workloads, first try MLX_VLM_INT8_SCOPE=mlp (keeps
+# attention numerics untouched), then drop --int8-prefill entirely.
 exec "$PYTHON_BIN" -m mlx_vlm.server \
   --host 0.0.0.0 \
   --port "$PORT" \
