@@ -139,6 +139,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--preserve-thinking",
+        action="store_true",
+        help=(
+            "Always render <think> blocks for assistant history turns "
+            "(templates that support preserve_thinking, e.g. Qwen3 family). "
+            "Keeps multi-turn prompt rendering position-independent so APC "
+            "prefix caching survives new user turns. "
+            "Maps to the MLX_VLM_PRESERVE_THINKING env var."
+        ),
+    )
+    parser.add_argument(
         "--thinking-budget",
         type=int,
         default=get_server_thinking_budget(),
@@ -284,6 +295,8 @@ def main():
     os.environ["MLX_VLM_LOG_PROGRESS_INTERVAL"] = str(args.log_progress_interval)
     os.environ["MLX_VLM_MAX_TOKENS"] = str(args.max_tokens)
     os.environ["MLX_VLM_ENABLE_THINKING"] = "1" if args.enable_thinking else "0"
+    if args.preserve_thinking:
+        os.environ["MLX_VLM_PRESERVE_THINKING"] = "1"
     if args.thinking_budget is not None:
         os.environ["MLX_VLM_THINKING_BUDGET"] = str(args.thinking_budget)
     if args.thinking_start_token is not None:

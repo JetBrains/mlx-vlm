@@ -31,6 +31,19 @@ if [ ! -x "$PYTHON_BIN" ]; then
   PYTHON_BIN="python3"
 fi
 
+# Cross-request KV cache reuse (Automatic Prefix Caching). Qwen3.6 is a
+# hybrid linear-attention model, so APC runs in "exact" whole-prefix-snapshot
+# mode: a warm hit needs the new prompt to extend a previously seen prompt,
+# which is the normal multi-turn chat pattern. Default keeps only 2 in-memory
+# snapshots; raise it a bit so a few parallel conversations stay warm.
+# Verify via server log line "APC enabled (...)" and GET /v1/cache/stats.
+# Note: --preserve-thinking (below) is required for warm hits to survive new
+# user turns -- without it the Qwen3.6 chat template re-renders older
+# assistant turns (drops their <think> blocks) whenever a new user message
+# arrives, which changes the token stream mid-history and misses the cache.
+export APC_ENABLED=1
+export APC_EXACT_CACHE_ENTRIES=4
+
 # W8A8 int8 prefill on the M5 neural accelerators (+30-47% prefill measured,
 # decode untouched -- see research/int8-nax/README.md). If a quality issue
 # shows up on real workloads, first try MLX_VLM_INT8_SCOPE=mlp (keeps
@@ -41,4 +54,5 @@ exec "$PYTHON_BIN" -m mlx_vlm.server \
   --model "$MODEL_ID" \
   --draft-model "$DRAFT_MODEL_ID" \
   --draft-kind mtp \
-  --int8-prefill
+  --int8-prefill \
+  --preserve-thinking

@@ -890,14 +890,16 @@ def stream_generate(
         image_hash = _apc.hash_image_payload(pixel_values=pixel_values, image_ref=image)
         audio_features = kwargs.get("input_features")
         video_features = kwargs.get("pixel_values_videos")
+        # inputs_embeds/mask are derived from the token ids plus the media
+        # hashed here, so they must not be folded into the salt — a
+        # whole-prompt tensor hash would make every prompt a distinct
+        # namespace and defeat cross-request prefix reuse.
         apc_extra_hash = _apc.semantic_extra_hash(
             tenant=apc_tenant,
             image_hash=image_hash,
             media={
                 "audio": audio_features if audio_features is not None else audio,
                 "video": video_features if video_features is not None else video,
-                "embeddings": kwargs.get("inputs_embeds"),
-                "masks": mask,
             },
             model=model,
             processor=processor,

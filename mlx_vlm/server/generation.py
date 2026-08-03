@@ -301,6 +301,13 @@ def get_server_enable_thinking():
     return raw.lower() in ("1", "true", "yes", "on")
 
 
+def get_server_preserve_thinking():
+    raw = os.environ.get("MLX_VLM_PRESERVE_THINKING")
+    if raw is None:
+        return False
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
 def get_server_thinking_budget():
     raw = os.environ.get("MLX_VLM_THINKING_BUDGET")
     return None if raw is None else int(raw)
@@ -793,6 +800,13 @@ class GenerationArguments:
     def to_template_kwargs(self) -> dict:
         """Convert to kwargs for apply_chat_template()."""
         kw = {"enable_thinking": self.enable_thinking}
+        # Render assistant history position-independently: Qwen3-family
+        # templates keep <think> blocks only for assistant turns after the
+        # last real user message, so a new user turn re-renders older
+        # assistant turns without them and every cached KV prefix (APC)
+        # is invalidated mid-history. preserve_thinking pins the rendering.
+        if get_server_preserve_thinking():
+            kw["preserve_thinking"] = True
         if self.reasoning is not None:
             kw["reasoning"] = self.reasoning
         if self.reasoning_effort is not None:
