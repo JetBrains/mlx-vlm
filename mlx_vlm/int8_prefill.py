@@ -1,6 +1,7 @@
 """Selective W8A8 int8 prefill on Apple M5 neural accelerators (NAX).
 
-For prefill-sized calls on whitelisted layer shapes (the MLP projections),
+For prefill-sized calls on the large language-model projections (MLP and,
+with the default "all" scope, the attention/linear-attention projections),
 replaces the 4-bit quantized matmul with an int8 x int8 -> int32 GEMM running
 on the M5 GPU neural accelerators via Metal Performance Primitives tensor ops:
 
@@ -25,6 +26,8 @@ pre-build). The server applies it at startup with --int8-prefill
 """
 
 import logging
+import os
+from collections import OrderedDict
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -32,13 +35,22 @@ import mlx.nn as nn
 logger = logging.getLogger(__name__)
 
 # Only calls with at least this many rows (tokens) take the int8 path; below
-# it the 4-bit qmm kernels win (they are ~2x faster than bf16 at decode sizes).
+# it the 4-bit qmm kernels win (they are ~2x faster than bf16 at decode
+# sizes). This is also what keeps generation on the current kernels: decode
+# calls have 1..O(draft block) rows, far below the threshold.
 ROW_THRESHOLD = 512
 
-# (N, K) shapes eligible for W8A8. Default: Qwen3.6-27B MLP projections
-# (gate/up 5120->17408, down 17408->5120). Attention projections are excluded
-# deliberately: they are more outlier-sensitive and a smaller FLOP share.
+# Scope of layers routed to W8A8 (env MLX_VLM_INT8_SCOPE):
+#   "all" (default): every large language-model projection — MLP plus
+#       attention/linear-attention (q/k/v/o, in_proj_qkv/z, out_proj).
+#   "mlp": only the MLP projections (gate/up 5120->17408, down 17408->5120),
+#       the more conservative choice if a quality eval flags "all".
+# Either way lm_head is excluded (N > MAX_OUT) and tiny projections such as
+# linear_attn.in_proj_a/b (N=48) fail the N % 128 tile requirement.
+SCOPE = os.environ.get("MLX_VLM_INT8_SCOPE", "all")
 MLP_SHAPES = {(17408, 5120), (5120, 17408)}
+MAX_OUT = 32768
+MIN_DIM = 1024
 
 _HEADER = """
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
@@ -217,11 +229,32 @@ def _weights_for(m: nn.Module):
 
 
 def _eligible(m: nn.Module, k_dim: int) -> bool:
-    w = m["weight"]
-    n = w.shape[0]
-    if (n, k_dim) not in MLP_SHAPES or n % _TN or k_dim % 32:
+    n = m["weight"].shape[0]
+    if n % _TN or k_dim % 32:
         return False
-    return True
+    if SCOPE == "mlp":
+        return (n, k_dim) in MLP_SHAPES
+    return n <= MAX_OUT and min(n, k_dim) >= MIN_DIM
+
+
+# q/k/v (and gate/up) are called with the *same* activation tensor; quantize
+# it once and reuse. Entries hold a strong reference to the input, so the
+# id() key stays valid for the entry's lifetime.
+_act_cache = OrderedDict()
+_ACT_CACHE_SIZE = 4
+
+
+def _quantize_rows_cached(x, k_dim):
+    key = id(x)
+    entry = _act_cache.get(key)
+    if entry is not None and entry[0] is x:
+        _act_cache.move_to_end(key)
+        return entry[1], entry[2]
+    xq, xs = _quantize_rows(x.reshape(-1, k_dim))
+    _act_cache[key] = (x, xq, xs)
+    if len(_act_cache) > _ACT_CACHE_SIZE:
+        _act_cache.popitem(last=False)
+    return xq, xs
 
 
 def apply():
@@ -234,16 +267,16 @@ def apply():
         if rows < ROW_THRESHOLD or not _eligible(self, k_dim):
             return ql_orig(self, x)
         wq, ws = _weights_for(self)
-        xq, xs = _quantize_rows(x.reshape(-1, k_dim))
+        xq, xs = _quantize_rows_cached(x, k_dim)
         bias = self["bias"] if "bias" in self else None
         y = _int8_gemm(xq, xs, wq, ws, bias=bias)
         return y.reshape(*x.shape[:-1], wq.shape[0])
 
     nn.QuantizedLinear.__call__ = ql_call
     logger.info(
-        "int8 NAX prefill patch applied (row threshold %d, shapes %s)",
+        "int8 NAX prefill patch applied (row threshold %d, scope %s)",
         ROW_THRESHOLD,
-        sorted(MLP_SHAPES),
+        SCOPE,
     )
 
 

@@ -280,16 +280,29 @@ wall-time is not all matmul — the 48 linear-attention (deltanet) kernels take
 a large share. Identical greedy output on this prompt is a smoke test, not a
 quality eval — run a real workload eval before trusting it broadly.
 
-**Next levers, in expected-value order:**
-1. Opt-in int8 for attention/linear-attn projection shapes (q/o,
-   in_proj_qkv/z/a/b, out_proj) — adds ~27% FLOP coverage; accuracy risk
-   moderate, needs eval.
-2. Share activation quantization between gate_proj and up_proj (same input x,
-   currently quantized twice per layer).
-3. Larger `--prefill-step-size` (bigger M amortizes better on all paths).
-4. Requantize int8 weights from the original bf16 checkpoint instead of the
+**Update (same day): attention/linear-attn projections included.** Levers 1
+and 2 below are implemented. Eligibility is now rule-based (N % 128 == 0,
+K % 32 == 0, min ≥ 1024, N ≤ 32768 — excludes lm_head and the tiny
+in_proj_a/b), controlled by `MLX_VLM_INT8_SCOPE` = `all` (default) | `mlp`
+(previous conservative behavior). Activation quantization is cached on input
+identity, so q/k/v and gate/up quantize their shared input once. Generation
+is untouched by construction: decode calls are far below ROW_THRESHOLD.
+
+Second A/B (scope=all, 96-token greedy generations):
+
+| prompt | prefill tok/s | output |
+|---|---|---|
+| filler 6.4k tokens | 819 → 1061 (**+29.5%**) | bit-identical |
+| document 11.8k tokens | 726 → 1070 (**+47.3%**) | not bit-identical; semantically equivalent (int8 attention changes KV numerics, greedy path may diverge) |
+
+If a quality eval on real workloads flags scope=all, set
+`MLX_VLM_INT8_SCOPE=mlp` (attention numerics then stay untouched).
+
+**Remaining levers:**
+1. Larger `--prefill-step-size` (bigger M amortizes better on all paths).
+2. Requantize int8 weights from the original bf16 checkpoint instead of the
    4-bit conversion (removes stacked quantization error; needs ~55 GB download).
-5. Row-quant kernel is ~78 GB/s effective; could be faster, but it's only ~7%
+3. Row-quant kernel is ~78 GB/s effective; could be faster, but it's only ~7%
    of the GEMM pipeline.
 
 ## 8. Files in this directory

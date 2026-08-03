@@ -36,4 +36,5 @@ exec "$PYTHON_BIN" -m mlx_vlm.server \
   --port "$PORT" \
   --model "$MODEL_ID" \
   --draft-model "$DRAFT_MODEL_ID" \
-  --draft-kind mtp
+  --draft-kind mtp \
+  --int8-prefill
