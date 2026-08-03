@@ -105,6 +105,26 @@ traffic. Change reverted.
 Decode reference for fp16 KV + MTP drafter by context: ~46 tok/s at 7.4k,
 ~37 at 30k (est.), ~30 at 90k (est. from plain-decode scaling ×1.5).
 
+**DFlash drafter** (`z-lab/Qwen3.6-27B-DFlash`, bf16, 5 layers,
+block_size 16, downloaded into the junie-local HF cache): tried via
+`--draft-kind dflash` on the same 14.9k-token request. Strictly worse than
+MTP on this stack:
+
+| config            | tok/s | accepted tokens/round | verify len |
+|-------------------|-------|-----------------------|------------|
+| MTP (block 3)     | 43.3  | 2.24                  | 3          |
+| dflash block 16   | 24.9  | 2.00                  | 16         |
+| dflash block 4    | 32.5  | 2.19                  | 4          |
+
+Same acceptance as MTP but each round pays a 16-token (or 4-token) verify
+plus a 3.2 GB bf16 drafter forward. Worse, output is NOT lossless: three
+different outputs (55/188 tokens) vs the target-greedy baseline (138),
+while MTP matches it exactly — likely a hybrid-GDN rollback or hidden
+capture bug in the dflash round path (built for pure-attention qwen3).
+Also note `--draft-kind dflash` routes the server into `_run_speculative`,
+which bypasses BatchGenerator and therefore APC. Do not use for Qwen3.6;
+MTP remains the drafter of choice.
+
 Acceptance visibility: the server now logs per-request
 `Speculative decode: request=... kind=mtp rounds=N accepted_tokens_per_round=X accept_rate=Y%`
 (`mlx_vlm/server/generation.py::_log_speculative_stats`), or `engaged=no` if
