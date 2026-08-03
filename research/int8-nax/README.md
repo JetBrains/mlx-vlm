@@ -241,6 +241,57 @@ W8A8 GEMM `Y[M,N] = (Xq[M,K]·i8 @ Wq[N,K].T·i8) · (x_scale[M] ⊗ w_scale[N])
 - **bf16 activations → int8**: quantize kernel reads bf16, writes int8 + fp32 row scales;
   trivial bandwidth cost at prefill sizes.
 
+## 7b. Implementation status (2026-08-03): SHIPPED, milestones 1–4 done
+
+Implemented in `mlx_vlm/int8_prefill.py`, served via `--int8-prefill`
+(`MLX_VLM_INT8_PREFILL=1`, applied in server lifespan like dequant-prefill).
+
+**Kernel results** (prototype scripts in this dir):
+- API path that works: `tensor_inline` views over raw device pointers
+  (`tensor<device int8_t, dextents<int32_t,2>, tensor_inline>(ptr, extents)`),
+  `matmul2d` with `dynamic_extent` K, cooperative destination tensor,
+  scales applied in-register via `get_multidimensional_index`. Gotchas:
+  `is_valid_element(i)` (docs say `get_mask`), plain `#pragma unroll`
+  (docs say `unroll full`), templated `slice<Extents...>()` (docs say
+  `static_slice`), int8 pointers are `device int8_t*` not `device char*`.
+- Tile sweep (`int8_gemm_sweep.py`): best = TM128/TN128/8 simdgroups,
+  internal K loop. **~91 TOPS-eq = 76% of the 120-TOPS int8 peak, 1.55x MLX's
+  bf16 NAX GEMM, 1.66x 4-bit qmm** at M=2048, K=5120, N=17408. Exact-int32
+  correct (error = bf16 output rounding only). Edge tiles (any M) handled.
+- Per-row activation quant kernel: 0.27 ms at M=2048 (vs 0.90 ms via mx ops).
+  Fused quant+GEMM: 4.07 ms = 1.49x bf16 GEMM end-to-end.
+
+**Model integration** (`mlx_vlm/int8_prefill.py`): patches
+`nn.QuantizedLinear.__call__`; routes calls with ≥512 rows AND weight shape in
+{(17408,5120), (5120,17408)} (the 192 MLP projections) to W8A8. int8 weights
+built lazily per module by dequantizing the resident 4-bit weights (~17 GB
+extra, fine in 128 GB; `warmup(model)` pre-builds). Decode and all other
+layers untouched.
+
+**End-to-end A/B** (`e2e_int8.py`, real model, 6422-token prompt, greedy):
+
+| | prefill tok/s | decode tok/s | output |
+|---|---|---|---|
+| baseline | 832–887 | ~34 | — |
+| int8 patch | **1000–1008** | ~33 (unchanged) | **bit-identical to baseline** |
+
+**+14–20% prefill.** Below the 1.3–1.4x Amdahl estimate because prefill
+wall-time is not all matmul — the 48 linear-attention (deltanet) kernels take
+a large share. Identical greedy output on this prompt is a smoke test, not a
+quality eval — run a real workload eval before trusting it broadly.
+
+**Next levers, in expected-value order:**
+1. Opt-in int8 for attention/linear-attn projection shapes (q/o,
+   in_proj_qkv/z/a/b, out_proj) — adds ~27% FLOP coverage; accuracy risk
+   moderate, needs eval.
+2. Share activation quantization between gate_proj and up_proj (same input x,
+   currently quantized twice per layer).
+3. Larger `--prefill-step-size` (bigger M amortizes better on all paths).
+4. Requantize int8 weights from the original bf16 checkpoint instead of the
+   4-bit conversion (removes stacked quantization error; needs ~55 GB download).
+5. Row-quant kernel is ~78 GB/s effective; could be faster, but it's only ~7%
+   of the GEMM pipeline.
+
 ## 8. Files in this directory
 
 | file | what it does |
@@ -250,6 +301,10 @@ W8A8 GEMM `Y[M,N] = (Xq[M,K]·i8 @ Wq[N,K].T·i8) · (x_scale[M] ⊗ w_scale[N])
 | `e2e_dequant.py` | end-to-end prefill tok/s on the real model, with/without the dequant-prefill patch |
 | `mma_rate.py` | raw NAX MMA rates (fp16/bf16/int8) via custom MPP tensor-ops kernel — **the 2x proof** |
 | `tensorops_compile_test.py` | minimal check that `mx.fast.metal_kernel` compiles MPP headers |
+| `int8_gemm_v1.py` | first working W8A8 GEMM (64×32 tiles), exact-int32 correctness harness |
+| `int8_gemm_sweep.py` | tile/simdgroup/K-loop sweep that found the 128×128×8simd config |
+| `w8a8.py` | standalone W8A8 building blocks (row-quant kernel + GEMM); production copy lives in `mlx_vlm/int8_prefill.py` |
+| `e2e_int8.py` | end-to-end A/B of the int8 prefill patch on the served model |
 
 Run any of them with the repo venv: `.venv/bin/python research/int8-nax/<file>.py`.
 Re-run `peak2.py` + `e2e_dequant.py` after every `mlx` upgrade — if upstream ships int8 or

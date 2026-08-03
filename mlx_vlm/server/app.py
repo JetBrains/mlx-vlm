@@ -335,6 +335,13 @@ async def lifespan(app):
         _apply_dequant_prefill()
         logger.info("Dequantize-on-the-fly prefill patch applied.")
 
+    int8_prefill = os.environ.get("MLX_VLM_INT8_PREFILL", "")
+    if int8_prefill.lower() in ("1", "true", "yes", "on"):
+        from ..int8_prefill import apply as _apply_int8_prefill
+
+        _apply_int8_prefill()
+        logger.info("int8 NAX prefill patch applied.")
+
     model_path = os.environ.pop("MLX_VLM_PRELOAD_MODEL", None)
     adapter_path = os.environ.pop("MLX_VLM_PRELOAD_ADAPTER", None)
     if model_path:
