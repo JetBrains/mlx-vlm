@@ -71,6 +71,40 @@ Forward-variant probe (4k ctx):
      small numerics risk after rollbacks.
   3. A deeper/tree drafter to raise tokens/round — the only path to >2x.
 
+## Follow-up experiments (both negative, mlx 0.32.0)
+
+**KV quantization** (`kv_bench.py`): hypothesis was that halving the
+full-attention KV reads would speed decode at long context. Measured plain
+greedy decode, one prefill + cache snapshot/restore per config, converting
+the 16 full-attention KVCache layers via `to_quantized()` /
+`TurboQuantKVCache.from_cache()`:
+
+| ctx  | fp16 KV | kv8 (affine) | turbo8 |
+|------|---------|--------------|--------|
+| 30k  | 25.1    | 20.7         | 20.3   |
+| 90k  | 19.8    | 13.2         | 13.0   |
+
+8-bit KV is a decode **regression at every context length, and it gets
+relatively worse as context grows** (+21% time at 30k, +53% at 90k): the
+fused fp16 SDPA kernel is far more efficient per byte than the unfused
+quantized attention (gather-qmm → softmax → gather-qmm), and Qwen3.6's
+full-attention KV is small to begin with (4 KV heads, every 4th layer).
+Do not add `--kv-bits` for speed. (It would still halve KV *memory* —
+~4.7 GB at 150k — if that ever becomes the constraint. Note also that
+`--kv-bits` currently doesn't even reach the MTP B=1 path:
+`make_speculative_prompt_cache` returns plain `model.make_cache()`, and the
+qwen3_5 verify attention would crash on a quantized cache's tuple K/V.)
+
+**bf16 GDN intermediate-state capture**: the verify round captures fp32
+per-step recurrent states (48 layers × [1,3,48,128,128] ≈ 450 MB writes per
+round) for rollback. Halving that with a bf16 capture dtype measured
+exactly 0 (50.3 vs 50.3 tok/s, identical output tokens) — the ~2.3 ms
+capture premium is the with-states kernel path itself, not the write
+traffic. Change reverted.
+
+Decode reference for fp16 KV + MTP drafter by context: ~46 tok/s at 7.4k,
+~37 at 30k (est.), ~30 at 90k (est. from plain-decode scaling ×1.5).
+
 Acceptance visibility: the server now logs per-request
 `Speculative decode: request=... kind=mtp rounds=N accepted_tokens_per_round=X accept_rate=Y%`
 (`mlx_vlm/server/generation.py::_log_speculative_stats`), or `engaged=no` if

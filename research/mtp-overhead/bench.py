@@ -140,6 +140,7 @@ def spec_decode(
         return time.perf_counter()
 
     b = int(first.item())
+    all_tokens = [b]
     emitted = 1
     rounds = 0
     draft_kwargs = mtp_mod._mtp_draft_kwargs(drafter, True, sampler)
@@ -189,6 +190,7 @@ def spec_decode(
 
         a = accepted_list[0]
         new_tokens = new_tokens_list[0]
+        all_tokens.extend(new_tokens)
         hidden = mtp_mod._mtp_draft_hidden(lm, verify.hidden[:, a : a + 1, :])
         emitted += len(new_tokens)
         if new_tokens:
@@ -228,6 +230,7 @@ def spec_decode(
         "mean_accept": sum(al) / len(al) if al else 0.0,
         "accept_rate": 100.0 * sum(al) / sum(dl) if dl and sum(dl) else 0.0,
         "ms_per_round": 1000.0 * elapsed / rounds if rounds else 0.0,
+        "generated_tokens": all_tokens,
     }
     if phases:
         result["phase_ms_per_round"] = {
