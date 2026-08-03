@@ -32,17 +32,18 @@ if [ ! -x "$PYTHON_BIN" ]; then
 fi
 
 # Cross-request KV cache reuse (Automatic Prefix Caching). Qwen3.6 is a
-# hybrid linear-attention model, so APC runs in "exact" whole-prefix-snapshot
-# mode: a warm hit needs the new prompt to extend a previously seen prompt,
-# which is the normal multi-turn chat pattern. Default keeps only 2 in-memory
-# snapshots; raise it a bit so a few parallel conversations stay warm.
-# Verify via server log line "APC enabled (...)" and GET /v1/cache/stats.
+# hybrid linear-attention model, so APC uses session storage: ONE shared
+# full-attention KV set per conversation (~64 KiB/token, e.g. ~9 GiB at 150k)
+# plus small recurrent-state checkpoints at the last few prefix lengths, so
+# a warm hit can resume from any recent checkpoint -- including one before a
+# mid-history edit. Verify via "APC enabled (...)" and GET /v1/cache/stats.
 # Note: --preserve-thinking (below) is required for warm hits to survive new
 # user turns -- without it the Qwen3.6 chat template re-renders older
 # assistant turns (drops their <think> blocks) whenever a new user message
 # arrives, which changes the token stream mid-history and misses the cache.
 export APC_ENABLED=1
-export APC_EXACT_CACHE_ENTRIES=4
+export APC_EXACT_SESSIONS=2        # concurrent conversations kept warm
+export APC_SESSION_CHECKPOINTS=8   # resumable positions per conversation
 
 # W8A8 int8 prefill on the M5 neural accelerators (+30-47% prefill measured,
 # decode untouched -- see research/int8-nax/README.md). If a quality issue

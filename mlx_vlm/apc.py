@@ -336,6 +336,48 @@ def _clone_layer_major_kv_cache_for_apc(
     return out
 
 
+def _session_layer_kinds(caches: Sequence[Any]) -> Optional[List[str]]:
+    """Classify a row-normalized prompt cache for session storage.
+
+    Returns per-layer ``"kv"`` (plain KVCache — per-token trimmable) or
+    ``"state"`` (ArraysCache — position-bound recurrent state), or ``None``
+    when any layer is neither (windowed/chunked/quantized/custom caches fall
+    back to whole-snapshot exact entries).
+    """
+    from .models import cache as lm
+
+    kinds: List[str] = []
+    for c in caches:
+        if type(c) is lm.KVCache:
+            kinds.append("kv")
+        elif type(c) is lm.ArraysCache:
+            kinds.append("state")
+        else:
+            return None
+    return kinds
+
+
+def _common_prefix_len(a: Tuple[int, ...], b: Tuple[int, ...]) -> int:
+    """Length of the longest common prefix of two token tuples.
+
+    Binary search over C-speed slice comparisons: O(log n) compares instead
+    of a Python-level per-token loop.
+    """
+    n = min(len(a), len(b))
+    if n == 0:
+        return 0
+    if a[:n] == b[:n]:
+        return n
+    lo, hi = 0, n - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if a[:mid] == b[:mid]:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
 def _cache_entry_supports_exact_apc(c: Any) -> bool:
     from .apc_adapters import apc_exact_eligible
 
@@ -531,6 +573,42 @@ class APCExactCacheEntry:
     token_ids: Tuple[int, ...]
     extra_hash: int
     prompt_cache: List[Any]
+    last_used: float
+
+
+@dataclass
+class APCSession:
+    """Append-mostly exact-mode storage for hybrid attention/SSM models.
+
+    A whole-snapshot ``APCExactCacheEntry`` duplicates the per-token K/V of
+    every full-attention layer for each stored prefix length, which is the
+    dominant memory cost (e.g. ~9 GiB per 150k-token snapshot for a 16
+    KV-layer model). But in the common serving pattern — one long
+    conversation that only grows — every snapshot's K/V is a slice of the
+    longest one. A session therefore keeps:
+
+    - ``kv_caches``: ONE set of full-attention K/V clones at the anchor
+      (longest stored) length. Plain ``KVCache`` is per-token trimmable, so
+      any checkpoint position can be served by slicing.
+    - ``checkpoints``: the recurrent (linear-attention/SSM) states at up to
+      ``APC_SESSION_CHECKPOINTS`` recent prefix lengths. These are small
+      (independent of sequence length) but position-bound: they cannot be
+      rewound, hence one snapshot per resumable position.
+
+    A lookup picks the largest checkpoint at or before the point where the
+    request's tokens diverge from ``token_ids`` — so, unlike whole-snapshot
+    entries, a session also gives partial-prefix reuse when history is
+    edited mid-way.
+    """
+
+    token_ids: Tuple[int, ...]
+    extra_hash: int
+    # Per-layer: cloned KVCache at len(token_ids) for full-attention layers,
+    # None at checkpoint-only (recurrent state) slots.
+    kv_caches: List[Optional[Any]]
+    # prefix_len -> per-layer cloned recurrent-state caches (None at KV
+    # slots), most recently stored last.
+    checkpoints: "OrderedDict[int, List[Optional[Any]]]"
     last_used: float
 
 
@@ -2861,6 +2939,18 @@ class APCManager:
         self._exact_cache_max = max(
             0, int(os.environ.get("APC_EXACT_CACHE_ENTRIES", "2"))
         )
+        # Session storage for hybrid attention/SSM models: one shared
+        # full-attention KV set per conversation plus N small recurrent-state
+        # checkpoints (see APCSession). Sessions replace whole-snapshot
+        # entries whenever the cache layout supports it.
+        self._exact_session_max = max(
+            0, int(os.environ.get("APC_EXACT_SESSIONS", "2"))
+        )
+        self._session_checkpoint_max = max(
+            1, int(os.environ.get("APC_SESSION_CHECKPOINTS", "8"))
+        )
+        self._sessions: "OrderedDict[int, APCSession]" = OrderedDict()
+        self._session_seq = 0
         self.exact_cache_guard_tokens = max(
             1, int(os.environ.get("APC_EXACT_PREFIX_GUARD_TOKENS", "16"))
         )
@@ -2987,7 +3077,11 @@ class APCManager:
         safe reuse unit is an exact prompt-cache snapshot at a prefix boundary.
         """
         disk = self.disk
-        if self._exact_cache_max <= 0 and disk is None:
+        if (
+            self._exact_cache_max <= 0
+            and self._exact_session_max <= 0
+            and disk is None
+        ):
             return None, 0
         token_tuple = tuple(int(t) for t in token_ids)
         max_len = len(token_tuple) - 1
@@ -2998,7 +3092,13 @@ class APCManager:
 
         source_cache: Optional[List[Any]] = None
         prefix_len = 0
+        session: Optional[APCSession] = None
+        session_len = 0
         with self.lock:
+            if self._sessions:
+                session, session_len = self._match_session_locked(
+                    token_tuple, extra_hash, max_len, min_prefix_tokens
+                )
             best_key: Optional[int] = None
             best_entry: Optional[APCExactCacheEntry] = None
             if self._exact_cache_max > 0:
@@ -3006,7 +3106,7 @@ class APCManager:
                     candidate_len = len(entry.token_ids)
                     if (
                         entry.extra_hash != extra_hash
-                        or candidate_len <= min_prefix_tokens
+                        or candidate_len <= max(min_prefix_tokens, session_len)
                         or candidate_len > max_len
                     ):
                         continue
@@ -3022,7 +3122,7 @@ class APCManager:
                     prefix_len = len(best_entry.token_ids)
                     source_cache = best_entry.prompt_cache
 
-        can_try_disk = disk is not None and prefix_len < max_len
+        can_try_disk = disk is not None and max(prefix_len, session_len) < max_len
         if can_try_disk and self._disk_min_free_ram_bytes > 0:
             free_now = _free_ram_bytes()
             if free_now is not None and free_now < self._disk_min_free_ram_bytes:
@@ -3038,7 +3138,7 @@ class APCManager:
                 token_tuple,
                 extra_hash=extra_hash,
                 max_prefix_tokens=max_prefix_tokens,
-                min_prefix_tokens=max(min_prefix_tokens, prefix_len),
+                min_prefix_tokens=max(min_prefix_tokens, prefix_len, session_len),
             )
             if disk_match is not None:
                 cache_hash, disk_prefix_len = disk_match
@@ -3097,19 +3197,168 @@ class APCManager:
                             self.stats.matched_tokens += disk_prefix_len
                         return prompt_cache, disk_prefix_len
 
-        if source_cache is None:
-            return None, 0
-        prompt_cache = _clone_prompt_cache_for_apc(
-            source_cache,
-            min_capacity_tokens=len(token_tuple) + 1,
-        )
-        if prompt_cache is None:
-            return None, 0
+        if source_cache is not None:
+            prompt_cache = _clone_prompt_cache_for_apc(
+                source_cache,
+                min_capacity_tokens=len(token_tuple) + 1,
+            )
+            if prompt_cache is not None:
+                with self.lock:
+                    self.stats.exact_hits += 1
+                    self.stats.hits += 1
+                    self.stats.matched_tokens += prefix_len
+                return prompt_cache, prefix_len
+        if session is not None and session_len > 0:
+            built = self._build_session_cache(
+                session, session_len, len(token_tuple) + 1
+            )
+            if built is not None:
+                with self.lock:
+                    session.last_used = time.time()
+                    self.stats.exact_hits += 1
+                    self.stats.hits += 1
+                    self.stats.matched_tokens += session_len
+                return built, session_len
+        return None, 0
+
+    # ---------------- session (shared-KV) exact storage ----------------
+
+    def _store_exact_session(
+        self,
+        token_tuple: Tuple[int, ...],
+        extra_hash: int,
+        copied: List[Any],
+        kinds: List[str],
+    ) -> bool:
+        """Store a snapshot into session storage (see :class:`APCSession`)."""
+        kv_row = [c if k == "kv" else None for c, k in zip(copied, kinds)]
+        state_row = [c if k == "state" else None for c, k in zip(copied, kinds)]
+        length = len(token_tuple)
+        now = time.time()
         with self.lock:
-            self.stats.exact_hits += 1
-            self.stats.hits += 1
-            self.stats.matched_tokens += prefix_len
-        return prompt_cache, prefix_len
+            target: Optional[APCSession] = None
+            target_key: Optional[int] = None
+            for key, sess in self._sessions.items():
+                if sess.extra_hash != extra_hash:
+                    continue
+                anchor_len = len(sess.token_ids)
+                if length >= anchor_len:
+                    if token_tuple[:anchor_len] == sess.token_ids:
+                        target, target_key = sess, key
+                        break
+                elif sess.token_ids[:length] == token_tuple:
+                    # Shorter prefix of an existing anchor: the anchor KV
+                    # already covers it, only register the state checkpoint.
+                    target, target_key = sess, key
+                    kv_row = None  # keep the (longer) anchor KV
+                    break
+            if target is None:
+                self._session_seq += 1
+                target_key = self._session_seq
+                target = APCSession(
+                    token_ids=token_tuple,
+                    extra_hash=int(extra_hash),
+                    kv_caches=kv_row,
+                    checkpoints=OrderedDict(),
+                    last_used=now,
+                )
+                self._sessions[target_key] = target
+                while len(self._sessions) > self._exact_session_max:
+                    self._sessions.popitem(last=False)
+            elif kv_row is not None:
+                # Extends (or equals) the anchor: the new KV supersedes it.
+                target.token_ids = token_tuple
+                target.kv_caches = kv_row
+            target.checkpoints[length] = state_row
+            target.checkpoints.move_to_end(length)
+            while len(target.checkpoints) > self._session_checkpoint_max:
+                target.checkpoints.popitem(last=False)
+            target.last_used = now
+            if target_key in self._sessions:
+                self._sessions.move_to_end(target_key)
+        return True
+
+    def _match_session_locked(
+        self,
+        token_tuple: Tuple[int, ...],
+        extra_hash: int,
+        max_len: int,
+        min_prefix_tokens: int,
+    ) -> Tuple[Optional["APCSession"], int]:
+        """Best resumable checkpoint across sessions. Caller holds the lock.
+
+        Unlike whole-snapshot entries, a session can resume from a
+        checkpoint *before* the point where the request diverges from the
+        anchor, so edited/regenerated history still gets partial reuse.
+        """
+        best_sess: Optional[APCSession] = None
+        best_len = 0
+        for sess in self._sessions.values():
+            if sess.extra_hash != extra_hash:
+                continue
+            limit = min(
+                _common_prefix_len(sess.token_ids, token_tuple), max_len
+            )
+            if limit <= min_prefix_tokens:
+                continue
+            for length in sess.checkpoints:
+                if min_prefix_tokens < length <= limit and length > best_len:
+                    best_sess, best_len = sess, length
+        return best_sess, best_len
+
+    def _build_session_cache(
+        self,
+        sess: "APCSession",
+        prefix_len: int,
+        min_capacity_tokens: int,
+    ) -> Optional[List[Any]]:
+        """Materialize a warm prompt cache at ``prefix_len`` from a session.
+
+        Full-attention layers are sliced out of the shared anchor KV;
+        recurrent-state layers are cloned from the matching checkpoint.
+        """
+        # Snapshot the references under the lock; the (large) clones happen
+        # outside it. A concurrent store may replace the session's fields,
+        # but the arrays we hold references to stay valid.
+        with self.lock:
+            states = sess.checkpoints.get(prefix_len)
+            kv_caches = list(sess.kv_caches)
+        if states is None:
+            return None
+        eval_targets: List[mx.array] = []
+        out: List[Any] = []
+        for kv, st in zip(kv_caches, list(states)):
+            if kv is not None:
+                if kv.keys is None or kv.values is None:
+                    return None
+                c = type(kv)()
+                keys = _copy_mlx_array(kv.keys[..., :prefix_len, :])
+                values = _copy_mlx_array(kv.values[..., :prefix_len, :])
+                step = int(getattr(kv, "step", getattr(type(kv), "step", 256)) or 0)
+                keys, values = _pad_kv_for_capacity(
+                    keys,
+                    values,
+                    offset=prefix_len,
+                    min_capacity_tokens=min_capacity_tokens,
+                    step=step,
+                )
+                c.keys, c.values, c.offset = keys, values, prefix_len
+                eval_targets.extend([keys, values])
+                out.append(c)
+            elif st is not None:
+                cp = _clone_cache_entry_for_apc(
+                    st,
+                    min_capacity_tokens=min_capacity_tokens,
+                    eval_targets=eval_targets,
+                )
+                if cp is None:
+                    return None
+                out.append(cp)
+            else:
+                return None
+        if eval_targets:
+            mx.eval(eval_targets)
+        return out
 
     def store_exact_cache(
         self,
@@ -3119,7 +3368,11 @@ class APCManager:
         extra_hash: int = 0,
     ) -> bool:
         """Store a full prompt-cache snapshot for exact-prefix reuse."""
-        if (self._exact_cache_max <= 0 and self.disk is None) or not token_ids:
+        if (
+            self._exact_cache_max <= 0
+            and self._exact_session_max <= 0
+            and self.disk is None
+        ) or not token_ids:
             return False
         token_tuple = tuple(int(t) for t in token_ids)
         copied = _clone_prompt_cache_for_apc(prompt_cache)
@@ -3140,26 +3393,44 @@ class APCManager:
             return False
         key = _sequence_hash(token_tuple, extra_hash, self.block_size)
         stored = False
-        with self.lock:
-            if self._exact_cache_max > 0:
-                self._exact_cache[key] = APCExactCacheEntry(
-                    token_ids=token_tuple,
-                    extra_hash=int(extra_hash),
-                    prompt_cache=copied,
-                    last_used=time.time(),
-                )
-                self._exact_cache.move_to_end(key)
-                while len(self._exact_cache) > self._exact_cache_max:
-                    self._exact_cache.popitem(last=False)
-                stored = True
-        if stored:
-            apc_trace(
-                "store",
-                mode="exact",
-                ok=True,
-                token_len=len(token_tuple),
-                layers=len(copied),
+        session_kinds = (
+            _session_layer_kinds(copied) if self._exact_session_max > 0 else None
+        )
+        if session_kinds is not None and any(k == "state" for k in session_kinds):
+            # Hybrid attention/SSM layout: session storage shares one KV set
+            # across all checkpoints instead of duplicating it per snapshot.
+            stored = self._store_exact_session(
+                token_tuple, extra_hash, copied, session_kinds
             )
+            if stored:
+                apc_trace(
+                    "store",
+                    mode="exact_session",
+                    ok=True,
+                    token_len=len(token_tuple),
+                    layers=len(copied),
+                )
+        else:
+            with self.lock:
+                if self._exact_cache_max > 0:
+                    self._exact_cache[key] = APCExactCacheEntry(
+                        token_ids=token_tuple,
+                        extra_hash=int(extra_hash),
+                        prompt_cache=copied,
+                        last_used=time.time(),
+                    )
+                    self._exact_cache.move_to_end(key)
+                    while len(self._exact_cache) > self._exact_cache_max:
+                        self._exact_cache.popitem(last=False)
+                    stored = True
+            if stored:
+                apc_trace(
+                    "store",
+                    mode="exact",
+                    ok=True,
+                    token_len=len(token_tuple),
+                    layers=len(copied),
+                )
         if self.disk is not None:
             try:
                 self.disk.save_exact_cache(key, token_tuple, extra_hash, copied)
@@ -3447,6 +3718,19 @@ class APCManager:
             self.stats.pool_used = sum(1 for x in self.pool if x.block_hash is not None)
             snap = self.stats.snapshot(self.num_blocks, self.block_size)
             snap["resident_bytes"] = self._resident_bytes_locked()
+            if self._sessions:
+                snap["exact_sessions"] = [
+                    {
+                        "anchor_tokens": len(s.token_ids),
+                        "checkpoints": sorted(s.checkpoints.keys()),
+                        "kv_bytes": sum(
+                            int(c.keys.nbytes) + int(c.values.nbytes)
+                            for c in s.kv_caches
+                            if c is not None and c.keys is not None
+                        ),
+                    }
+                    for s in self._sessions.values()
+                ]
             if self.disk is not None:
                 snap["disk_bytes"] = self.disk.disk_bytes
                 snap["disk_max_bytes"] = self.disk.max_bytes
@@ -3483,6 +3767,7 @@ class APCManager:
             for b in self.pool:
                 self._free_push(b)
             self._exact_cache.clear()
+            self._sessions.clear()
             self.stats = APCStats()
 
     def close(self) -> None:
