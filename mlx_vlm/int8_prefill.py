@@ -6,9 +6,11 @@ replaces the 4-bit quantized matmul with an int8 x int8 -> int32 GEMM running
 on the M5 GPU neural accelerators via Metal Performance Primitives tensor ops:
 
   - activations: per-token (per-row) dynamic symmetric int8, custom kernel
-  - weights: per-output-channel symmetric int8, derived lazily (once per
-    module) by dequantizing the resident 4-bit weights; kept alongside them
-    (~17 GB extra for Qwen3.6-27B, fine on a 128 GB machine)
+  - weights: per-output-channel symmetric int8, derived lazily by
+    dequantizing the resident 4-bit weights (~24 GB extra at scope=all for
+    Qwen3.6-27B) and EVICTED after TTL_S seconds without a prefill-sized
+    call, so with APC session reuse the memory cost is transient: it is paid
+    only around cold prefills, not while the server sits warm
   - accumulation int32, scales applied in-register, bf16 output
 
 Decode-sized calls (rows < ROW_THRESHOLD) keep the 4-bit quantized kernels,
@@ -27,6 +29,8 @@ pre-build). The server applies it at startup with --int8-prefill
 
 import logging
 import os
+import threading
+import time
 from collections import OrderedDict
 
 import mlx.core as mx
@@ -51,6 +55,14 @@ SCOPE = os.environ.get("MLX_VLM_INT8_SCOPE", "all")
 MLP_SHAPES = {(17408, 5120), (5120, 17408)}
 MAX_OUT = 32768
 MIN_DIM = 1024
+
+# The int8 weight copies cost ~24 GB (scope=all) but only earn their keep
+# during prefill-sized calls -- with APC session reuse those are rare (cold
+# prefills). Evict them after this many seconds without an int8-path call and
+# rebuild lazily on the next cold prefill (a few seconds, amortized over the
+# prefill's first chunk). 0 disables eviction (weights kept for the server
+# lifetime, the pre-TTL behavior).
+TTL_S = float(os.environ.get("MLX_VLM_INT8_TTL_S", "120"))
 
 _HEADER = """
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
@@ -150,8 +162,43 @@ _GEMM_SRC = """
 _TM, _TN, _NSIMD = 128, 128, 8
 _quant_kernels = {}
 _gemm_kernels = {}
-# id(module) -> (wq int8 [N,K], ws fp32 [N]); modules live for server lifetime
+# id(module) -> (wq int8 [N,K], ws fp32 [N]); modules live for server
+# lifetime, entries are evicted after TTL_S idle (see _reaper).
 _int8_weights = {}
+_weights_lock = threading.Lock()
+_last_use = 0.0
+_reaper_started = False
+
+
+def _touch():
+    global _last_use
+    _last_use = time.monotonic()
+
+
+def _reaper():
+    while True:
+        time.sleep(max(TTL_S / 4.0, 5.0))
+        with _weights_lock:
+            if _int8_weights and time.monotonic() - _last_use > TTL_S:
+                n = len(_int8_weights)
+                _int8_weights.clear()
+                _act_cache.clear()
+                mx.clear_cache()
+                logger.info(
+                    "int8 NAX prefill: evicted %d int8 weight copies after "
+                    "%.0fs idle",
+                    n,
+                    TTL_S,
+                )
+
+
+def _start_reaper():
+    global _reaper_started
+    if TTL_S > 0 and not _reaper_started:
+        _reaper_started = True
+        threading.Thread(
+            target=_reaper, name="int8-prefill-reaper", daemon=True
+        ).start()
 
 
 def _quantize_rows(x):
@@ -207,24 +254,30 @@ def _int8_gemm(xq, xs, wq, ws, bias=None):
 
 
 def _weights_for(m: nn.Module):
-    """Per-output-channel int8 weights for a QuantizedLinear, built once."""
-    entry = _int8_weights.get(id(m))
-    if entry is None:
-        w = mx.dequantize(
-            m["weight"],
-            m["scales"],
-            m.get("biases"),
-            group_size=m.group_size,
-            bits=m.bits,
-            mode=getattr(m, "mode", "affine"),
-        )
-        ws = mx.maximum(mx.abs(w).max(axis=1), 1e-8).astype(mx.float32) / 127.0
-        wq = mx.clip(
-            mx.round(w.astype(mx.float32) / ws[:, None]), -127, 127
-        ).astype(mx.int8)
-        mx.eval(wq, ws)
-        entry = (wq, ws)
-        _int8_weights[id(m)] = entry
+    """Per-output-channel int8 weights for a QuantizedLinear (built lazily,
+    evicted after TTL_S idle)."""
+    _touch()
+    with _weights_lock:
+        entry = _int8_weights.get(id(m))
+        if entry is None:
+            w = mx.dequantize(
+                m["weight"],
+                m["scales"],
+                m.get("biases"),
+                group_size=m.group_size,
+                bits=m.bits,
+                mode=getattr(m, "mode", "affine"),
+            )
+            ws = (
+                mx.maximum(mx.abs(w).max(axis=1), 1e-8).astype(mx.float32)
+                / 127.0
+            )
+            wq = mx.clip(
+                mx.round(w.astype(mx.float32) / ws[:, None]), -127, 127
+            ).astype(mx.int8)
+            mx.eval(wq, ws)
+            entry = (wq, ws)
+            _int8_weights[id(m)] = entry
     return entry
 
 
@@ -273,10 +326,13 @@ def apply():
         return y.reshape(*x.shape[:-1], wq.shape[0])
 
     nn.QuantizedLinear.__call__ = ql_call
+    _start_reaper()
     logger.info(
-        "int8 NAX prefill patch applied (row threshold %d, scope %s)",
+        "int8 NAX prefill patch applied (row threshold %d, scope %s, "
+        "weight-cache TTL %.0fs)",
         ROW_THRESHOLD,
         SCOPE,
+        TTL_S,
     )
 
 
