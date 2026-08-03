@@ -653,6 +653,19 @@ def load_model_resources(model_path: str, adapter_path: Optional[str]):
             model_path, adapter_path, trust_remote_code=trust_remote_code
         )
         config = model.config
+        hybrid_fp16 = os.environ.get("MLX_VLM_HYBRID_FP16", "")
+        if hybrid_fp16.lower() in ("1", "true", "yes", "on"):
+            if getattr(config, "model_type", None) == "laguna":
+                from ..hybrid_fp16 import NUM_FP16_LAYERS, apply as _apply_hybrid_fp16
+
+                _apply_hybrid_fp16(model)
+                logger.info(
+                    "Hybrid fp16 patch applied (first %d layers).", NUM_FP16_LAYERS
+                )
+            else:
+                logger.warning(
+                    "MLX_VLM_HYBRID_FP16 set but model_type is not laguna; skipping."
+                )
         logger.info("Model and processor loaded successfully.")
         return model, processor, config
     except Exception as e:

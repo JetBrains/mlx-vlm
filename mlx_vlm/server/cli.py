@@ -87,6 +87,25 @@ def main():
         help="Tokens per prefill step (default: %(default)s).",
     )
     parser.add_argument(
+        "--dequant-prefill",
+        action="store_true",
+        help=(
+            "Transiently dequantize quantized weights to bf16 for prefill-sized "
+            "matmuls and use plain GEMMs (decode keeps the quantized kernels). "
+            "Maps to the MLX_VLM_DEQUANT_PREFILL env var."
+        ),
+    )
+    parser.add_argument(
+        "--hybrid-fp16",
+        action="store_true",
+        help=(
+            "Run attention/MoE block internals in fp16 for the early layers "
+            "while keeping the residual stream bf16 (faster on M1-family GPUs, "
+            "which emulate bfloat). Laguna models only. "
+            "Maps to the MLX_VLM_HYBRID_FP16 env var."
+        ),
+    )
+    parser.add_argument(
         "--log-progress-interval",
         type=int,
         default=get_log_progress_interval(),
@@ -247,6 +266,10 @@ def main():
         os.environ["MLX_VLM_DRAFT_BLOCK_SIZE"] = str(args.draft_block_size)
     if args.prefill_step_size:
         os.environ["PREFILL_STEP_SIZE"] = str(args.prefill_step_size)
+    if args.dequant_prefill:
+        os.environ["MLX_VLM_DEQUANT_PREFILL"] = "1"
+    if args.hybrid_fp16:
+        os.environ["MLX_VLM_HYBRID_FP16"] = "1"
     os.environ["MLX_VLM_LOG_PROGRESS_INTERVAL"] = str(args.log_progress_interval)
     os.environ["MLX_VLM_MAX_TOKENS"] = str(args.max_tokens)
     os.environ["MLX_VLM_ENABLE_THINKING"] = "1" if args.enable_thinking else "0"

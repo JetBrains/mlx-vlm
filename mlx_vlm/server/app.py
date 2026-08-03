@@ -328,6 +328,13 @@ def load_audio_model(model_path: str):
 
 @asynccontextmanager
 async def lifespan(app):
+    dequant_prefill = os.environ.get("MLX_VLM_DEQUANT_PREFILL", "")
+    if dequant_prefill.lower() in ("1", "true", "yes", "on"):
+        from ..dequant_prefill import apply as _apply_dequant_prefill
+
+        _apply_dequant_prefill()
+        logger.info("Dequantize-on-the-fly prefill patch applied.")
+
     model_path = os.environ.pop("MLX_VLM_PRELOAD_MODEL", None)
     adapter_path = os.environ.pop("MLX_VLM_PRELOAD_ADAPTER", None)
     if model_path:

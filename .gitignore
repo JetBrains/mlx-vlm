@@ -27,3 +27,5 @@ var/
 .venv
 .codex_tmp/
 .vscode
+# JetBrains IDE
+.idea/
