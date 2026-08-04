@@ -50,6 +50,16 @@ fi
 export APC_ENABLED=1
 export APC_EXACT_SESSIONS=2        # concurrent conversations kept warm
 export APC_SESSION_CHECKPOINTS=8   # resumable positions per conversation
+# Persist APC snapshots on SSD so warm prefixes survive restarts.
+export APC_DISK_PATH="$HOME/.local/share/junie-local/apc-cache"
+
+# Stable cross-session prompt prefix (Junie system message + tool schemas +
+# first user message; byte-identical across sessions). Prefilled once at
+# startup, pinned in APC (never evicted, doesn't count against
+# APC_EXACT_SESSIONS), and persisted via APC_DISK_PATH — so the FIRST
+# request of a brand-new Junie session already warm-starts. Watch for
+# "Seed prefix warmed and pinned" in the log.
+SEED_REQUEST="$SCRIPT_DIR/research/junie.json"
 
 # W8A8 int8 prefill on the M5 neural accelerators (see
 # research/int8-nax/README.md). int8 weight tensors are built per layer by a
@@ -67,4 +77,5 @@ exec "$PYTHON_BIN" -m mlx_vlm.server \
   --draft-kind mtp \
   --int8-prefill \
   --prefill-step-size 4096 \
-  --preserve-thinking
+  --preserve-thinking \
+  --seed-request "$SEED_REQUEST"

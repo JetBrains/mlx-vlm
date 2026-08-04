@@ -1,12 +1,13 @@
 import asyncio
 import gc
+import json
 import logging
 import os
 import secrets
 import sys
 import time
 from contextlib import asynccontextmanager
-from threading import Lock
+from threading import Lock, Thread
 from types import SimpleNamespace
 from typing import List, Optional, Tuple
 
@@ -326,6 +327,84 @@ def load_audio_model(model_path: str):
     return load_model(model_path)
 
 
+def _start_seed_prefix_warmup() -> None:
+    """Prefill and pin a stable cross-session prompt prefix at startup.
+
+    ``MLX_VLM_SEED_REQUEST`` points at a chat-completions request body whose
+    rendered prompt is a shared prefix of every future conversation (for
+    Junie: the system message + tool schemas + first user message). The
+    request is replayed against the server's own endpoint with
+    ``max_tokens=1`` so it takes the exact same template/tokenize path as
+    real traffic; the APC harvest then stores a session checkpoint just
+    inside the stable region (the exact-prefix guard keeps it clear of the
+    trailing generation header), and the pin keeps it from ever being
+    LRU-evicted. With ``APC_DISK_PATH`` set the snapshot also persists, so
+    later restarts warm from disk instead of re-prefilling.
+    """
+    seed_path = os.environ.get("MLX_VLM_SEED_REQUEST")
+    if not seed_path:
+        return
+
+    port = os.environ.get("MLX_VLM_SERVER_PORT")
+    if not port:
+        logger.warning("Seed request set but server port unknown; skipping.")
+        return
+
+    def run():
+        import urllib.error
+        import urllib.request
+
+        try:
+            with open(seed_path) as f:
+                body = json.load(f)
+        except Exception as e:
+            logger.warning("Seed request: cannot read %s: %s", seed_path, e)
+            return
+        body["max_tokens"] = 1
+        body["stream"] = False
+        data = json.dumps(body).encode()
+        base = f"http://127.0.0.1:{port}"
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen(f"{base}/health", timeout=2)
+                break
+            except Exception:
+                time.sleep(0.5)
+        manager = runtime.apc_manager
+        if manager is None or not callable(
+            getattr(manager, "pin_next_session_store", None)
+        ):
+            logger.info("Seed request: APC not enabled; skipping warmup.")
+            return
+        headers = {"Content-Type": "application/json"}
+        api_key = os.environ.get("MLX_VLM_SERVER_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        manager.pin_next_session_store()
+        started = time.time()
+        try:
+            request = urllib.request.Request(
+                f"{base}/v1/chat/completions", data=data, headers=headers
+            )
+            with urllib.request.urlopen(request, timeout=3600) as resp:
+                payload = json.loads(resp.read())
+            usage = payload.get("usage") or {}
+            details = usage.get("prompt_tokens_details") or {}
+            logger.info(
+                "Seed prefix warmed and pinned: prompt_tokens=%s "
+                "cached_tokens=%s elapsed=%.1fs source=%s",
+                usage.get("prompt_tokens"),
+                details.get("cached_tokens"),
+                time.time() - started,
+                seed_path,
+            )
+        except Exception as e:
+            logger.warning("Seed prefix warmup failed: %s", e)
+
+    Thread(target=run, daemon=True, name="apc-seed-warmup").start()
+
+
 @asynccontextmanager
 async def lifespan(app):
     dequant_prefill = os.environ.get("MLX_VLM_DEQUANT_PREFILL", "")
@@ -383,6 +462,7 @@ async def lifespan(app):
             model_kind=model_kind,
         )
         logger.info("%s ready.", label.capitalize())
+    _start_seed_prefix_warmup()
     try:
         yield
     finally:

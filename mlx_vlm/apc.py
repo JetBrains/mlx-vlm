@@ -610,6 +610,10 @@ class APCSession:
     # slots), most recently stored last.
     checkpoints: "OrderedDict[int, List[Optional[Any]]]"
     last_used: float
+    # Pinned sessions are never LRU-evicted and don't count against
+    # APC_EXACT_SESSIONS. Used for seed prefixes shared by every future
+    # conversation (e.g. the Junie system+tools preamble).
+    pinned: bool = False
 
 
 @dataclass(frozen=True)
@@ -2951,6 +2955,7 @@ class APCManager:
         )
         self._sessions: "OrderedDict[int, APCSession]" = OrderedDict()
         self._session_seq = 0
+        self._pin_next_session_store = False
         self.exact_cache_guard_tokens = max(
             1, int(os.environ.get("APC_EXACT_PREFIX_GUARD_TOKENS", "16"))
         )
@@ -3153,6 +3158,38 @@ class APCManager:
                         and len(stored_tokens) == disk_prefix_len
                         and token_tuple[:disk_prefix_len] == stored_tokens
                     ):
+                        # Promote hybrid (attention/SSM) restores into session
+                        # storage so later prefix-divergent requests get a
+                        # pure-memory checkpoint hit at this boundary instead
+                        # of paying disk-restore latency again. This is what
+                        # keeps a pinned seed prefix memory-warm across
+                        # restarts: the warm-restart harvest can only
+                        # checkpoint at the full prompt length (which includes
+                        # the request's generation header, past the shared
+                        # region), while this promotion re-registers the
+                        # disk entry's guard-boundary state.
+                        session_kinds = (
+                            _session_layer_kinds(prompt_cache)
+                            if self._exact_session_max > 0
+                            else None
+                        )
+                        if session_kinds is not None and any(
+                            k == "state" for k in session_kinds
+                        ):
+                            promoted = _clone_prompt_cache_for_apc(prompt_cache)
+                            if promoted is not None:
+                                self._store_exact_session(
+                                    stored_tokens,
+                                    int(extra_hash),
+                                    promoted,
+                                    session_kinds,
+                                )
+                            with self.lock:
+                                self.stats.exact_hits += 1
+                                self.stats.disk_hits += 1
+                                self.stats.hits += 1
+                                self.stats.matched_tokens += disk_prefix_len
+                            return prompt_cache, disk_prefix_len
                         # Promote the disk-restored entry to the in-memory LRU
                         # so subsequent identical requests get the fast clone
                         # path instead of paying disk-restore latency again.
@@ -3241,6 +3278,12 @@ class APCManager:
             for key, sess in self._sessions.items():
                 if sess.extra_hash != extra_hash:
                     continue
+                # Pinned seed sessions are read-only for normal stores: a
+                # live conversation that extends the seed prefix gets its
+                # own session, so the seed's anchor and checkpoint never
+                # rotate out. (The seed's own store carries the pin flag.)
+                if sess.pinned and not self._pin_next_session_store:
+                    continue
                 anchor_len = len(sess.token_ids)
                 if length >= anchor_len:
                     if token_tuple[:anchor_len] == sess.token_ids:
@@ -3263,12 +3306,20 @@ class APCManager:
                     last_used=now,
                 )
                 self._sessions[target_key] = target
-                while len(self._sessions) > self._exact_session_max:
-                    self._sessions.popitem(last=False)
             elif kv_row is not None:
                 # Extends (or equals) the anchor: the new KV supersedes it.
                 target.token_ids = token_tuple
                 target.kv_caches = kv_row
+            if self._pin_next_session_store:
+                target.pinned = True
+                self._pin_next_session_store = False
+            # Pinned sessions don't count against the LRU cap and are
+            # never evicted.
+            unpinned = [
+                key for key, sess in self._sessions.items() if not sess.pinned
+            ]
+            while len(unpinned) > self._exact_session_max:
+                self._sessions.pop(unpinned.pop(0), None)
             target.checkpoints[length] = state_row
             target.checkpoints.move_to_end(length)
             while len(target.checkpoints) > self._session_checkpoint_max:
@@ -3277,6 +3328,16 @@ class APCManager:
             if target_key in self._sessions:
                 self._sessions.move_to_end(target_key)
         return True
+
+    def pin_next_session_store(self) -> None:
+        """Mark the next stored exact session as pinned (never LRU-evicted).
+
+        Used by the server's seed-prefix warmup so a stable cross-session
+        prompt prefix (system message + tool schemas) survives
+        ``APC_EXACT_SESSIONS`` turnover from live conversations.
+        """
+        with self.lock:
+            self._pin_next_session_store = True
 
     def _match_session_locked(
         self,
@@ -3723,6 +3784,7 @@ class APCManager:
                     {
                         "anchor_tokens": len(s.token_ids),
                         "checkpoints": sorted(s.checkpoints.keys()),
+                        "pinned": s.pinned,
                         "kv_bytes": sum(
                             int(c.keys.nbytes) + int(c.values.nbytes)
                             for c in s.kv_caches

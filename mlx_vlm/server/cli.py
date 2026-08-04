@@ -233,6 +233,17 @@ def main():
         help="Override the drafter's configured block size.",
     )
     parser.add_argument(
+        "--seed-request",
+        type=str,
+        default=None,
+        help=(
+            "Path to a chat-completions request body whose rendered prompt "
+            "is a stable prefix of future conversations. It is prefilled at "
+            "startup and pinned in APC so new sessions warm-start; with "
+            "APC_DISK_PATH set the snapshot persists across restarts."
+        ),
+    )
+    parser.add_argument(
         "--top-logprobs-k",
         type=int,
         default=None,
@@ -314,6 +325,9 @@ def main():
         os.environ["TOP_LOGPROBS_K"] = str(args.top_logprobs_k)
     if args.api_key:
         os.environ["MLX_VLM_SERVER_API_KEY"] = args.api_key
+    os.environ["MLX_VLM_SERVER_PORT"] = str(args.port)
+    if args.seed_request:
+        os.environ["MLX_VLM_SEED_REQUEST"] = args.seed_request
 
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.basicConfig(
