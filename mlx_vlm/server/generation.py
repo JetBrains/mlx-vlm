@@ -1449,12 +1449,28 @@ class ResponseGenerator:
         if drafter is None:
             return
         accept_lens = list(getattr(drafter, "accept_lens", None) or [])
-        if not accept_lens:
+        ngram_lens = list(getattr(drafter, "ngram_accept_lens", None) or [])
+        ngram_note = ""
+        if ngram_lens:
+            ngram_note = (
+                f" ngram_rounds={len(ngram_lens)}"
+                f" ngram_accepted_tokens_per_round="
+                f"{(sum(ngram_lens) + len(ngram_lens)) / len(ngram_lens):.2f}"
+            )
+        if not accept_lens and not ngram_lens:
             logger.info(
                 "Speculative decode: request=%s kind=%s engaged=no "
                 "(no draft rounds recorded)",
                 request_id,
                 self.draft_kind,
+            )
+            return
+        if not accept_lens:
+            logger.info(
+                "Speculative decode: request=%s kind=%s rounds=0%s",
+                request_id,
+                self.draft_kind,
+                ngram_note,
             )
             return
         rounds = len(accept_lens)
@@ -1467,21 +1483,23 @@ class ResponseGenerator:
             accept_rate = 100.0 * accepted / sum(draft_lens)
             logger.info(
                 "Speculative decode: request=%s kind=%s rounds=%d "
-                "accepted_tokens_per_round=%.2f accept_rate=%.1f%%",
+                "accepted_tokens_per_round=%.2f accept_rate=%.1f%%%s",
                 request_id,
                 self.draft_kind,
                 rounds,
                 tokens_per_round,
                 accept_rate,
+                ngram_note,
             )
         else:
             logger.info(
                 "Speculative decode: request=%s kind=%s rounds=%d "
-                "accepted_tokens_per_round=%.2f",
+                "accepted_tokens_per_round=%.2f%s",
                 request_id,
                 self.draft_kind,
                 rounds,
                 tokens_per_round,
+                ngram_note,
             )
 
     def _make_sampler(self, args: GenerationArguments) -> Optional[Callable]:

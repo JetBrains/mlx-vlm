@@ -1937,6 +1937,20 @@ class PromptProcessingBatch:
                 )
 
         if self.draft_model is not None and self.draft_kind is not None:
+            # On an APC warm hit ``_input_ids`` holds only the uncached
+            # suffix; the n-gram prompt-lookup draft source wants the full
+            # prompt, which the APC metadata preserved.
+            spec_prompt_tokens = self._input_ids
+            if (
+                len(self.uids) == 1
+                and self._apc_meta
+                and self._apc_meta[0] is not None
+                and self._apc_meta[0].get("full_input_ids")
+            ):
+                spec_prompt_tokens = mx.array(
+                    [list(self._apc_meta[0]["full_input_ids"])],
+                    dtype=self._input_ids.dtype,
+                )
             gen_batch = SpeculativeGenerationBatch(
                 model=self.model,
                 draft_model=self.draft_model,
@@ -1951,7 +1965,7 @@ class PromptProcessingBatch:
                 shared_kv_states=(
                     output.shared_kv_states if self.draft_kind == "mtp" else None
                 ),
-                prompt_tokens=self._input_ids,
+                prompt_tokens=spec_prompt_tokens,
                 draft_block_size=self.draft_block_size,
                 token_dtype=self._input_ids.dtype,
                 greedy_sampling=self.greedy_sampling,

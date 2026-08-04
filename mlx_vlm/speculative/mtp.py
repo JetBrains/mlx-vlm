@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
@@ -810,6 +811,108 @@ def _mtp_draft_block_active(
     return mx.concatenate(rowwise_tokens, axis=0)
 
 
+class _NgramPromptLookup:
+    """Prompt-lookup draft source (vLLM-style n-gram speculator).
+
+    Maps every n-gram in the context to the position right after its
+    rightmost occurrence; when the trailing n-gram of (prompt + generated)
+    matches, the tokens that followed it last time become the draft block.
+    Proposing is free (no model forward) and the target verify pass still
+    gates every token, so drafts from here are lossless. Agentic coding
+    outputs quote/edit code that already sits in the prompt, which is where
+    this pays off.
+
+    A consecutive-failure backoff stops it from burning long verifies on
+    coincidental matches: after each round that accepts < 2 draft tokens the
+    next 2^k proposals are skipped (k capped), and a good round resets it.
+    The draft window is adaptive: it starts at ``base_draft`` and doubles
+    (up to ``max_draft``) while rounds accept the full draft, so long
+    verbatim copies stream in big blocks without making misses expensive.
+    """
+
+    def __init__(
+        self, ids: List[int], n: int, max_draft: int, min_draft: int, base_draft: int
+    ):
+        self.n = n
+        self.max_draft = max_draft
+        self.min_draft = min_draft
+        self.base_draft = min(base_draft, max_draft)
+        self.ids = [int(t) for t in ids]
+        self.index: Dict[tuple, int] = {}
+        self._indexed = 0
+        self._failures = 0
+        self._cooldown = 0
+        self._window = self.base_draft
+        self._reindex()
+
+    def _reindex(self) -> None:
+        ids, n = self.ids, self.n
+        end = len(ids) - n  # only grams with at least 1 continuation token
+        index = self.index
+        for i in range(self._indexed, end):
+            index[tuple(ids[i : i + n])] = i + n
+        if end > self._indexed:
+            self._indexed = end
+
+    def extend(self, tokens) -> None:
+        self.ids.extend(int(t) for t in tokens)
+        self._reindex()
+
+    def propose(self, budget: int) -> List[int]:
+        if self._cooldown > 0:
+            self._cooldown -= 1
+            return []
+        if len(self.ids) < self.n or budget < self.min_draft:
+            return []
+        start = self.index.get(tuple(self.ids[-self.n :]))
+        if start is None:
+            return []
+        cont = self.ids[start : min(start + self._window, len(self.ids))]
+        cont = cont[:budget]
+        return cont if len(cont) >= self.min_draft else []
+
+    def record(self, accepted: int, drafted: int) -> None:
+        if accepted >= drafted:
+            self._window = min(self._window * 2, self.max_draft)
+        elif accepted < 2:
+            self._window = self.base_draft
+        if accepted >= 2:
+            self._failures = 0
+        else:
+            self._failures += 1
+            self._cooldown = min(64, 2 ** self._failures)
+
+
+def _make_ngram_lookup(prompt_tokens, batch_size: int):
+    """Build the prompt-lookup index for the B=1 server round loop."""
+    if batch_size != 1 or prompt_tokens is None:
+        return None
+    if os.environ.get("MLX_VLM_NGRAM_DRAFT", "1").lower() in ("0", "false", "off"):
+        return None
+    ids = prompt_tokens
+    if isinstance(ids, mx.array):
+        ids = ids.reshape(-1).tolist()
+    elif ids and isinstance(ids[0], (list, tuple)):
+        ids = list(ids[0])
+    n = int(os.environ.get("MLX_VLM_NGRAM_N", "4"))
+    max_draft = int(os.environ.get("MLX_VLM_NGRAM_MAX", "32"))
+    min_draft = int(os.environ.get("MLX_VLM_NGRAM_MIN", "3"))
+    base_draft = int(os.environ.get("MLX_VLM_NGRAM_BASE", "12"))
+    if n < 1 or max_draft < min_draft or min_draft < 1 or base_draft < min_draft:
+        return None
+    return _NgramPromptLookup(
+        ids, n=n, max_draft=max_draft, min_draft=min_draft, base_draft=base_draft
+    )
+
+
+def _record_ngram_round(draft_model: nn.Module, accepted: float, drafted: int) -> None:
+    if not hasattr(draft_model, "ngram_accept_lens"):
+        draft_model.ngram_accept_lens = []
+        draft_model.ngram_draft_lens = []
+    draft_model.ngram_accept_lens.append(accepted)
+    draft_model.ngram_draft_lens.append(int(drafted))
+
+
 def _mtp_rounds_batch(
     model: nn.Module,
     draft_model: nn.Module,
@@ -826,6 +929,7 @@ def _mtp_rounds_batch(
     eos_token_ids: Optional[set] = None,
     greedy_sampling: bool = False,
     row_ids: Optional[List[int]] = None,
+    prompt_tokens: Optional[mx.array] = None,
 ) -> Generator[Tuple[List[Optional[int]], None], None, None]:
     """Batched Gemma 4 MTP round loop (B >= 1).
 
@@ -850,6 +954,9 @@ def _mtp_rounds_batch(
         draft_model.reset(model, left_padding=[0] * B)
     else:
         draft_model.reset(model)
+    draft_model.ngram_accept_lens = []
+    draft_model.ngram_draft_lens = []
+    ngram_lookup = _make_ngram_lookup(prompt_tokens, B)
     sampler_rng = _SpeculativeSamplerRNG(
         draft_model,
         enabled=not greedy_sampling
@@ -876,6 +983,8 @@ def _mtp_rounds_batch(
     )
 
     b = first_bonus.tolist()
+    if ngram_lookup is not None:
+        ngram_lookup.extend(b)
     emitted = [1] * B
     finished = [False] * B
     active_idx = list(range(B))
@@ -899,19 +1008,31 @@ def _mtp_rounds_batch(
         positions_active = [positions[active_idx[j]] for j in range(n_active)]
         b_arr = mx.array(b_active, dtype=token_dtype)
 
-        # Draft (autoregressive K-step). hidden / shared_kv state was set
-        # via set_shared_kv above; the drafter pulls it from there.
-        draft_tokens = sampler_rng.draft_tokens(
-            _mtp_draft_block_active,
-            draft_model,
-            b_active,
-            hidden,
-            bs,
-            sampler,
-            token_dtype,
-            positions_active,
-            greedy_sampling=greedy_sampling,
-        )
+        # Prompt-lookup draft: when the trailing n-gram of the context
+        # matches an earlier occurrence, verify its continuation instead of
+        # running the drafter. Free to propose; the verify pass still gates
+        # every token. B=1 only (the lookup follows a single sequence).
+        ngram_draft: List[int] = []
+        if ngram_lookup is not None and n_active == 1:
+            ngram_draft = ngram_lookup.propose(max_tokens - emitted[active_idx[0]])
+
+        if ngram_draft:
+            bs = len(ngram_draft) + 1
+            draft_tokens = mx.array([ngram_draft], dtype=token_dtype)
+        else:
+            # Draft (autoregressive K-step). hidden / shared_kv state was set
+            # via set_shared_kv above; the drafter pulls it from there.
+            draft_tokens = sampler_rng.draft_tokens(
+                _mtp_draft_block_active,
+                draft_model,
+                b_active,
+                hidden,
+                bs,
+                sampler,
+                token_dtype,
+                positions_active,
+                greedy_sampling=greedy_sampling,
+            )
 
         # Verify
         with mx.stream(generation_stream):
@@ -980,14 +1101,20 @@ def _mtp_rounds_batch(
             sampler_rng.target_sampled(
                 sync_draft=not _sampler_supports_positioned_target(sampler)
             )
-        # Keep the adaptive block-size history on a per-round basis so
-        # batched MTP reacts like the singleton loop instead of letting
-        # batch size change the controller signal.
-        _record_speculative_round(
-            draft_model,
-            sum(accepted_list) / len(accepted_list),
-            bs - 1,
-        )
+        if ngram_draft:
+            _record_ngram_round(draft_model, accepted_list[0], bs - 1)
+            ngram_lookup.record(accepted_list[0], bs - 1)
+        else:
+            # Keep the adaptive block-size history on a per-round basis so
+            # batched MTP reacts like the singleton loop instead of letting
+            # batch size change the controller signal.
+            _record_speculative_round(
+                draft_model,
+                sum(accepted_list) / len(accepted_list),
+                bs - 1,
+            )
+        if ngram_lookup is not None and new_tokens_list and new_tokens_list[0]:
+            ngram_lookup.extend(new_tokens_list[0])
 
         max_a = max(accepted_list)
 

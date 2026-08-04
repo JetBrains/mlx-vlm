@@ -189,6 +189,7 @@ def run_speculative_server_rounds(
             eos_token_ids=eos_token_ids,
             greedy_sampling=greedy_sampling,
             row_ids=row_ids,
+            prompt_tokens=prompt_tokens,
         )
         return
 
