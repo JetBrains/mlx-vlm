@@ -233,6 +233,15 @@ def main():
         help="Override the drafter's configured block size.",
     )
     parser.add_argument(
+        "--log-raw-tokens",
+        action="store_true",
+        help=(
+            "Log each request's generated tokens as text once it finishes, "
+            "with accepted speculative tokens colored (green = MTP drafter, "
+            "cyan = n-gram prompt lookup)."
+        ),
+    )
+    parser.add_argument(
         "--seed-request",
         type=str,
         default=None,
@@ -326,6 +335,8 @@ def main():
     if args.api_key:
         os.environ["MLX_VLM_SERVER_API_KEY"] = args.api_key
     os.environ["MLX_VLM_SERVER_PORT"] = str(args.port)
+    if args.log_raw_tokens:
+        os.environ["MLX_VLM_LOG_RAW_TOKENS"] = "1"
     if args.seed_request:
         os.environ["MLX_VLM_SEED_REQUEST"] = args.seed_request
 

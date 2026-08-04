@@ -78,4 +78,5 @@ exec "$PYTHON_BIN" -m mlx_vlm.server \
   --int8-prefill \
   --prefill-step-size 4096 \
   --preserve-thinking \
-  --seed-request "$SEED_REQUEST"
+  --seed-request "$SEED_REQUEST" \
+  --log-raw-tokens

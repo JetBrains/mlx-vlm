@@ -957,6 +957,12 @@ def _mtp_rounds_batch(
     draft_model.ngram_accept_lens = []
     draft_model.ngram_draft_lens = []
     ngram_lookup = _make_ngram_lookup(prompt_tokens, B)
+    # Per-token provenance for the raw-token log (see the server's
+    # --log-raw-tokens): "draft" = accepted MTP draft, "ngram" = accepted
+    # prompt-lookup draft, "target" = sampled by the target (bonus tokens).
+    # Only tracked for B == 1, where emission order equals request order.
+    draft_model.token_origins = []
+    track_origins = B == 1
     sampler_rng = _SpeculativeSamplerRNG(
         draft_model,
         enabled=not greedy_sampling
@@ -983,6 +989,8 @@ def _mtp_rounds_batch(
     )
 
     b = first_bonus.tolist()
+    if track_origins:
+        draft_model.token_origins.append(("target", int(b[0])))
     if ngram_lookup is not None:
         ngram_lookup.extend(b)
     emitted = [1] * B
@@ -1115,6 +1123,13 @@ def _mtp_rounds_batch(
             )
         if ngram_lookup is not None and new_tokens_list and new_tokens_list[0]:
             ngram_lookup.extend(new_tokens_list[0])
+        if track_origins:
+            accepted_0 = accepted_list[0]
+            tag = "ngram" if ngram_draft else "draft"
+            for pos, tok in enumerate(new_tokens_list[0]):
+                draft_model.token_origins.append(
+                    (tag if pos < accepted_0 else "target", int(tok))
+                )
 
         max_a = max(accepted_list)
 

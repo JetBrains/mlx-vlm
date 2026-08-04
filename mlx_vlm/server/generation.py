@@ -66,6 +66,15 @@ def _get_draft_block_size_from_env():
     return int(draft_block_size_str) if draft_block_size_str else None
 
 
+def get_log_raw_tokens_enabled() -> bool:
+    return os.environ.get("MLX_VLM_LOG_RAW_TOKENS", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _notify_queues(queues, *items):
     for queue in queues:
         for item in items:
@@ -1074,6 +1083,7 @@ class ResponseGenerator:
         self.quantized_kv_start = quantized_kv_start
         self.top_logprobs_k = top_logprobs_k
         self.apc_manager = apc_manager
+        self._raw_token_log = get_log_raw_tokens_enabled()
         self.tokenizer = None
         self.requests: Queue = Queue()
         self._stop = False
@@ -1437,6 +1447,49 @@ class ResponseGenerator:
                 progress_rate_text,
             )
         return now
+
+    # ANSI colors for the raw-token log: bright green for tokens the MTP
+    # drafter proposed and the target accepted, bright cyan for accepted
+    # n-gram prompt-lookup drafts; target-sampled tokens stay uncolored.
+    _RAW_TOKEN_COLORS = {"draft": "\033[92m", "ngram": "\033[96m"}
+    _RAW_TOKEN_RESET = "\033[0m"
+
+    def _log_raw_generated_tokens(self, info: dict) -> None:
+        """Log the request's generated tokens as text, colored by origin."""
+        tokens = info.get("raw_tokens")
+        if not tokens or self.tokenizer is None:
+            return
+        origins = (
+            list(getattr(self.draft_model, "token_origins", None) or [])
+            if self.draft_model is not None
+            else []
+        )
+        origins = origins[: len(tokens)]
+        if len(origins) == len(tokens) and all(
+            int(orig_tok) == int(tok) for (_, orig_tok), tok in zip(origins, tokens)
+        ):
+            tags = [tag for tag, _ in origins]
+        else:
+            # Provenance unavailable (non-speculative path, batched decode,
+            # or a mismatch) — dump plain text.
+            tags = ["target"] * len(tokens)
+        segments = []
+        i = 0
+        while i < len(tokens):
+            j = i
+            while j < len(tokens) and tags[j] == tags[i]:
+                j += 1
+            text = self.tokenizer.decode(tokens[i:j], skip_special_tokens=False)
+            color = self._RAW_TOKEN_COLORS.get(tags[i])
+            segments.append(f"{color}{text}{self._RAW_TOKEN_RESET}" if color else text)
+            i = j
+        logger.info(
+            "Raw generated tokens: request=%s tokens=%d "
+            "(green=MTP draft accepted, cyan=ngram draft accepted):\n%s",
+            info.get("request_id"),
+            len(tokens),
+            "".join(segments),
+        )
 
     def _log_speculative_stats(self, request_id) -> None:
         """Log drafter acceptance stats for the batch a request finished in.
@@ -2333,6 +2386,9 @@ class ResponseGenerator:
 
             lp = r.token_logprob
 
+            if self._raw_token_log and token_count:
+                info.setdefault("raw_tokens", []).append(int(tok))
+
             emitted_at = self._log_decode_progress(
                 r.uid,
                 info,
@@ -2361,6 +2417,8 @@ class ResponseGenerator:
                 rqueue.put(None)
                 del active[r.uid]
                 self._log_speculative_stats(info.get("request_id", r.uid))
+                if self._raw_token_log:
+                    self._log_raw_generated_tokens(info)
 
     def _stream_text(self, info: dict, token: int, finish_reason: Optional[str]) -> str:
         """Convert one generated token into a streaming text segment."""
