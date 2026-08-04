@@ -448,6 +448,16 @@ class GenerationTimings(BaseModel):
     predicted_per_token_ms: float
     predicted_per_second: float
     peak_memory: float = 0.0
+    # Speculative decoding (when a drafter is active). draft_n /
+    # draft_n_accepted follow llama.cpp's timings naming and cover ALL
+    # draft sources; the ngram_* fields break out the n-gram prompt-lookup
+    # subset. draft_rounds counts verify passes.
+    draft_n: Optional[int] = None
+    draft_n_accepted: Optional[int] = None
+    draft_rounds: Optional[int] = None
+    ngram_n: Optional[int] = None
+    ngram_n_accepted: Optional[int] = None
+    ngram_rounds: Optional[int] = None
 
     @staticmethod
     def _derive_gen_tps(token_times: List[float]) -> Optional[float]:
@@ -475,6 +485,7 @@ class GenerationTimings(BaseModel):
         predicted_ms = (
             output_tokens / generation_tps * 1000.0 if generation_tps else 0.0
         )
+        spec = getattr(metrics, "spec_stats", None) or {}
         return cls(
             prompt_n=prompt_n,
             cache_n=int(cached_tokens),
@@ -488,6 +499,12 @@ class GenerationTimings(BaseModel):
             ),
             predicted_per_second=float(generation_tps or 0.0),
             peak_memory=float(metrics.peak_memory or 0.0),
+            draft_n=spec.get("draft_n"),
+            draft_n_accepted=spec.get("draft_n_accepted"),
+            draft_rounds=spec.get("draft_rounds"),
+            ngram_n=spec.get("ngram_n"),
+            ngram_n_accepted=spec.get("ngram_n_accepted"),
+            ngram_rounds=spec.get("ngram_rounds"),
         )
 
 

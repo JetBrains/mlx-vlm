@@ -860,6 +860,7 @@ class GenerationMetrics:
     token_times: List[float] = field(default_factory=list)
     peak_memory: float = 0.0
     cached_tokens: int = 0
+    spec_stats: Optional[dict] = None
     prompt_tps: Optional[float] = None
     generation_tps: Optional[float] = None
     last_chunk_at: Optional[float] = None
@@ -911,6 +912,9 @@ class GenerationMetrics:
         cached_tokens = getattr(result, "cached_tokens", None)
         if cached_tokens is not None:
             self.cached_tokens = max(self.cached_tokens, int(cached_tokens))
+        spec_stats = getattr(result, "spec_stats", None)
+        if spec_stats is not None:
+            self.spec_stats = spec_stats
 
 
 @dataclass
@@ -932,6 +936,9 @@ class StreamingToken:
     cached_tokens: int = 0
     token_count: int = 1
     emitted_at: Optional[float] = None
+    # Speculative-decoding counters for the finished request (set on the
+    # final token only); surfaced in the response "timings" block.
+    spec_stats: Optional[dict] = None
 
 
 class _DiffusionBlockEmitter:
@@ -1490,6 +1497,26 @@ class ResponseGenerator:
             len(tokens),
             "".join(segments),
         )
+
+    def _speculative_stats_snapshot(self) -> Optional[dict]:
+        """Counters for the batch that just finished, for response timings."""
+        drafter = self.draft_model
+        if drafter is None:
+            return None
+        accept_lens = list(getattr(drafter, "accept_lens", None) or [])
+        draft_lens = list(getattr(drafter, "draft_lens", None) or [])
+        ngram_accept = list(getattr(drafter, "ngram_accept_lens", None) or [])
+        ngram_draft = list(getattr(drafter, "ngram_draft_lens", None) or [])
+        ngram_n = int(sum(ngram_draft))
+        ngram_accepted = int(sum(ngram_accept))
+        return {
+            "draft_n": int(sum(draft_lens)) + ngram_n,
+            "draft_n_accepted": int(sum(accept_lens)) + ngram_accepted,
+            "draft_rounds": len(accept_lens) + len(ngram_accept),
+            "ngram_n": ngram_n,
+            "ngram_n_accepted": ngram_accepted,
+            "ngram_rounds": len(ngram_accept),
+        }
 
     def _log_speculative_stats(self, request_id) -> None:
         """Log drafter acceptance stats for the batch a request finished in.
@@ -2410,6 +2437,11 @@ class ResponseGenerator:
                     cached_tokens=info.get("cached_tokens", 0),
                     token_count=token_count,
                     emitted_at=emitted_at,
+                    spec_stats=(
+                        self._speculative_stats_snapshot()
+                        if r.finish_reason
+                        else None
+                    ),
                 )
             )
 
