@@ -169,12 +169,68 @@ fi
 
 # ---------------------------------------------------------------------------
 # 3) Python environment (first run only).
+#
+# mlx>=0.32 ships wheels for CPython 3.10-3.14 only, while the stock
+# /usr/bin/python3 from the Xcode Command Line Tools is still 3.9 -- so the
+# venv is built with uv, which downloads a suitable managed CPython on its
+# own. uv itself is auto-installed into <repo>/.uv when not already
+# present, so the script has no prerequisites at all and everything it
+# bootstraps stays inside the repo dir (gitignored).
 # ---------------------------------------------------------------------------
-if [ ! -x "$SCRIPT_DIR/.venv/bin/python" ]; then
-  echo "Creating virtualenv at $SCRIPT_DIR/.venv ..."
-  python3 -m venv "$SCRIPT_DIR/.venv"
-  "$SCRIPT_DIR/.venv/bin/python" -m pip install --upgrade pip
-  "$SCRIPT_DIR/.venv/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
+VENV="$SCRIPT_DIR/.venv"
+VENV_MARKER="$VENV/.deps-installed"
+VENV_PYTHON_VERSION=3.13
+UV_DIR="$SCRIPT_DIR/.uv"
+
+# Managed-CPython downloads also go inside the repo dir (uv's default is
+# ~/.local/share/uv/python).
+export UV_PYTHON_INSTALL_DIR="$UV_DIR/python"
+
+find_uv() {
+  command -v uv 2>/dev/null && return 0
+  for cand in "$UV_DIR/bin/uv" "$HOME/.local/bin/uv"; do
+    if [ -x "$cand" ]; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! UV_BIN="$(find_uv)"; then
+  echo "Installing uv (Python package manager) to $UV_DIR/bin ..."
+  curl -LsSf https://astral.sh/uv/install.sh \
+    | env UV_INSTALL_DIR="$UV_DIR/bin" INSTALLER_NO_MODIFY_PATH=1 sh
+  UV_BIN="$UV_DIR/bin/uv"
+fi
+
+# A venv built by an older run with Python <3.10 can never install the
+# dependencies -- rebuild it.
+if [ -x "$VENV/bin/python" ] \
+   && ! "$VENV/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
+        >/dev/null 2>&1; then
+  echo "Existing virtualenv uses Python <3.10; recreating it..."
+  rm -rf "$VENV"
+fi
+
+if [ ! -x "$VENV/bin/python" ]; then
+  echo "Creating virtualenv at $VENV (Python $VENV_PYTHON_VERSION via uv) ..."
+  venv_setup_failed() {
+    rm -rf "$VENV"
+  }
+  trap venv_setup_failed EXIT
+  # Downloads a managed CPython automatically when the machine has none.
+  "$UV_BIN" venv --python "$VENV_PYTHON_VERSION" "$VENV"
+  "$UV_BIN" pip install --python "$VENV/bin/python" -r "$SCRIPT_DIR/requirements.txt"
+  touch "$VENV_MARKER"
+  trap - EXIT
+elif [ ! -f "$VENV_MARKER" ]; then
+  # Venv exists but a previous run died before finishing the dependency
+  # install (or predates the marker). The install is a fast no-op when
+  # everything is already satisfied.
+  echo "Verifying virtualenv dependencies..."
+  "$UV_BIN" pip install --python "$VENV/bin/python" -r "$SCRIPT_DIR/requirements.txt"
+  touch "$VENV_MARKER"
 fi
 
 # ---------------------------------------------------------------------------

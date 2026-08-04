@@ -27,7 +27,9 @@ The first run takes a while; it automatically:
 1. downloads the model weights (~17 GB, SHA256-verified, resumable — just
    re-run the script if interrupted),
 2. writes the Junie model descriptor and sets it as Junie's default model,
-3. creates the Python virtualenv and installs dependencies,
+3. creates the Python virtualenv and installs dependencies (via `uv`,
+   which is itself auto-installed and downloads Python 3.13 if the machine
+   has none — the stock macOS `python3` is too old for `mlx>=0.32`),
 4. starts the server and prefills + pins the shared Junie prompt prefix
    (~12 s; later restarts restore it from disk in ~0.5 s — look for
    `Seed prefix warmed and pinned` in the log).
@@ -71,6 +73,8 @@ are fully KV-cached.)
 | `~/.local/share/junie-local/models/` | model weights, HF-hub layout (`models--mlx-community--Qwen3.6-27B-4bit`, `...-MTP-4bit`, plus `.models--*.installed` completion markers) |
 | `~/.local/share/junie-local/incomplete_downloads/` | in-progress downloads (kept for resume, removed when done) |
 | `~/.local/share/junie-local/apc-cache/` | APC disk tier — holds only the pinned seed snapshot (~1 GB) so it survives restarts |
+| `<repo>/.uv/bin/uv` | `uv` binary (only when not already installed on the machine) |
+| `<repo>/.uv/python/` | uv-managed CPython 3.13 (only when the machine has no suitable Python) |
 | `~/.junie/models/local-qwen3.6-27b-4bit-vlm.json` | Junie model descriptor pointing at this server |
 | `~/.junie/settings.json` | existing Junie settings; `modelForLaunch` is set to this model |
 

@@ -25,6 +25,7 @@ var/
 # virtual environment
 .myenv
 .venv
+.uv/
 .codex_tmp/
 .vscode
 # JetBrains IDE
