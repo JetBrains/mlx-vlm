@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Serve the OpenAI-compatible chat/completions endpoint using the mlx-vlm
-# sources in this repo (not any pip-installed copy), with a pre-downloaded
-# local model.
+# One-command install + serve for the Junie local server.
+#
+# On every run this script makes sure the pieces are in place, then starts
+# the OpenAI-compatible server from this repo's sources:
+#   1) model weights   -> downloaded/verified into ~/.local/share/junie-local
+#   2) Junie descriptor -> written to ~/.junie/models
+#   3) python venv      -> created at ./.venv on first run
+#   4) server           -> mlx_vlm.server on port 8085
+#
+# Steps 1-3 are no-ops when already done, so this is also the everyday
+# start command.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# Everything below goes both to the screen and to mlx_server.log in the
+# repo dir (gitignored; truncated on each start).
+exec > >(tee "$SCRIPT_DIR/mlx_server.log") 2>&1
 
 PORT=8085
 MODEL_ID="mlx-community/Qwen3.6-27B-4bit"
@@ -21,11 +33,159 @@ MODEL_ID="mlx-community/Qwen3.6-27B-4bit"
 # up in the log as "Speculative decode: ... accepted_tokens_per_round=".
 DRAFT_MODEL_ID="mlx-community/Qwen3.6-27B-MTP-4bit"
 
-# The model is already downloaded into a Hugging Face hub-style cache dir
-# (models--org--name/snapshots/...) that lives outside the default HF cache
-# location. Point the HF cache at it and load by repo id, offline, so
-# "/v1/models" reports a clean id instead of a raw filesystem path.
-export HF_HUB_CACHE="/Users/stanislav.erokhin/.local/share/junie-local/models"
+# ---------------------------------------------------------------------------
+# 1) Model weights (download style borrowed from junie-local's install.sh:
+#    resumable curl with retry/backoff, SHA256 verification, HF-hub-layout
+#    zips extracted with completion markers so interrupted installs redo
+#    cleanly).
+# ---------------------------------------------------------------------------
+BASE_URL="https://download.jetbrains.com/resources/junie-local"
+BASE_DIR="$HOME/.local/share/junie-local"
+MODELS_DIR="$BASE_DIR/models"
+DOWNLOAD_DIR="$BASE_DIR/incomplete_downloads"
+
+MODEL_ZIP_1="models--mlx-community--Qwen3.6-27B-4bit.zip"
+MODEL_SHA256_1="adf7f8d832ed994dcc6d09372036b4d12f49a4ccda066179cc64dc2dd113f91d"
+MODEL_DIR_ID_1="mlx-community--Qwen3.6-27B-4bit"
+MODEL_ZIP_2="models--mlx-community--Qwen3.6-27B-MTP-4bit.zip"
+MODEL_SHA256_2="9266c1ba244ec6176fc82474bbfd20614969eb28c4cfa24301e515fbd1f5a525"
+MODEL_DIR_ID_2="mlx-community--Qwen3.6-27B-MTP-4bit"
+
+download_with_retry() {
+  url="$1"
+  output_file="$2"
+  max_retries="${3:-3}"
+  attempt=1
+  delay=2
+
+  while [ "$attempt" -le "$max_retries" ]; do
+    echo "  Attempt $attempt of $max_retries..."
+    if curl --progress-bar -SL -C - -o "$output_file" "$url"; then
+      return 0
+    fi
+
+    if [ "$attempt" -lt "$max_retries" ]; then
+      echo "  Download failed. Retrying in ${delay}s..."
+      sleep "$delay"
+      delay=$((delay * 2))
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  echo "  ERROR: Download failed after $max_retries attempts."
+  return 1
+}
+
+download_and_verify() {
+  archive="$1"
+  expected_sha256="$2"
+
+  echo "Downloading $archive..."
+  download_with_retry "$BASE_URL/$archive" "$DOWNLOAD_DIR/$archive"
+  echo "  Download complete. Checking SHA256..."
+
+  actual=$(shasum -a 256 "$DOWNLOAD_DIR/$archive" | awk '{print $1}')
+  if [ "$actual" != "$expected_sha256" ]; then
+    echo "  ERROR: SHA256 mismatch for $archive"
+    echo "    Expected: $expected_sha256"
+    echo "    Actual:   $actual"
+    exit 1
+  fi
+  echo "  SHA256 verified: $actual"
+}
+
+model_completion_marker() {
+  echo "$MODELS_DIR/.models--$1.installed"
+}
+
+model_installed() {
+  model_dir_id="$1"
+  [ -d "$MODELS_DIR/models--$model_dir_id" ] \
+    && [ -f "$(model_completion_marker "$model_dir_id")" ]
+}
+
+install_model_if_needed() {
+  zip_file="$1"
+  sha256_sum="$2"
+  model_dir_id="$3"
+
+  if model_installed "$model_dir_id"; then
+    return 0
+  fi
+
+  echo "Model $model_dir_id is not installed. Downloading..."
+  mkdir -p "$MODELS_DIR" "$DOWNLOAD_DIR"
+  download_and_verify "$zip_file" "$sha256_sum"
+  echo "Extracting $zip_file to $MODELS_DIR..."
+  # Remove leftovers from a previously interrupted extraction
+  rm -rf "$MODELS_DIR/models--$model_dir_id"
+  unzip -q "$DOWNLOAD_DIR/$zip_file" -d "$MODELS_DIR"
+  touch "$(model_completion_marker "$model_dir_id")"
+  rm -f "$DOWNLOAD_DIR/$zip_file"
+  echo "  Extraction complete."
+}
+
+install_model_if_needed "$MODEL_ZIP_1" "$MODEL_SHA256_1" "$MODEL_DIR_ID_1"
+install_model_if_needed "$MODEL_ZIP_2" "$MODEL_SHA256_2" "$MODEL_DIR_ID_2"
+rmdir "$DOWNLOAD_DIR" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 2) Junie model descriptor.
+#
+# The id must be the real HF repo id (slash form) because Junie sends it
+# verbatim as the "model" field and the server loads that repo.
+# enable_thinking stays disabled -- the server side relies on it (see
+# --preserve-thinking below).
+# ---------------------------------------------------------------------------
+JUNIE_MODELS_DIR="$HOME/.junie/models"
+JUNIE_MODEL_NAME="local-qwen3.6-27b-4bit-vlm"
+JUNIE_MODEL_FILE="$JUNIE_MODELS_DIR/$JUNIE_MODEL_NAME.json"
+mkdir -p "$JUNIE_MODELS_DIR"
+cat > "$JUNIE_MODEL_FILE" <<EOF
+{
+  "id": "$MODEL_ID",
+  "baseUrl": "http://localhost:$PORT/v1/chat/completions",
+  "apiType": "OpenAICompletion",
+  "temperature": 0.6,
+  "maxContextLength": 150000,
+  "extraBody": {
+    "enable_thinking": false
+  }
+}
+EOF
+echo "Junie model descriptor: $JUNIE_MODEL_FILE"
+
+# Set this model as Junie's default (same mechanism as junie-local's
+# install.sh: descriptor-file models are addressed as "custom:<file stem>").
+JUNIE_SETTINGS="$HOME/.junie/settings.json"
+if [ -f "$JUNIE_SETTINGS" ]; then
+  plutil -replace "modelForLaunch" -string "custom:$JUNIE_MODEL_NAME" \
+    "$JUNIE_SETTINGS"
+  echo "Junie default model set to $JUNIE_MODEL_NAME (restart Junie to apply)."
+else
+  echo "WARNING: Junie settings not found at $JUNIE_SETTINGS;"
+  echo "         select the $MODEL_ID model in Junie manually."
+fi
+
+# ---------------------------------------------------------------------------
+# 3) Python environment (first run only).
+# ---------------------------------------------------------------------------
+if [ ! -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+  echo "Creating virtualenv at $SCRIPT_DIR/.venv ..."
+  python3 -m venv "$SCRIPT_DIR/.venv"
+  "$SCRIPT_DIR/.venv/bin/python" -m pip install --upgrade pip
+  "$SCRIPT_DIR/.venv/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
+fi
+
+# ---------------------------------------------------------------------------
+# 4) Server.
+# ---------------------------------------------------------------------------
+
+# The models live in a Hugging Face hub-style cache dir (models--org--name/
+# snapshots/...) outside the default HF cache location. Point the HF cache
+# at it and load by repo id, offline, so "/v1/models" reports a clean id
+# instead of a raw filesystem path.
+export HF_HUB_CACHE="$MODELS_DIR"
 export HF_HUB_OFFLINE=1
 
 # Make sure "import mlx_vlm" resolves to this checkout's sources, ahead of
@@ -50,8 +210,10 @@ fi
 export APC_ENABLED=1
 export APC_EXACT_SESSIONS=2        # concurrent conversations kept warm
 export APC_SESSION_CHECKPOINTS=8   # resumable positions per conversation
-# Persist APC snapshots on SSD so warm prefixes survive restarts.
-export APC_DISK_PATH="$HOME/.local/share/junie-local/apc-cache"
+# Persist the pinned seed snapshot on SSD so it survives restarts (only the
+# seed is written -- APC_DISK_EXACT_SCOPE defaults to "pinned", so the disk
+# tier stays at ~1 GB instead of one multi-GB snapshot per request).
+export APC_DISK_PATH="$BASE_DIR/apc-cache"
 
 # Stable cross-session prompt prefix (Junie system message + tool schemas +
 # first user message; byte-identical across sessions). Prefilled once at
