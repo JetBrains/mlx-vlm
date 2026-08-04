@@ -2956,6 +2956,14 @@ class APCManager:
         self._sessions: "OrderedDict[int, APCSession]" = OrderedDict()
         self._session_seq = 0
         self._pin_next_session_store = False
+        # Which exact snapshots go to the disk tier: "pinned" (default)
+        # persists only pinned seed-prefix stores — live conversations stay
+        # memory-only, keeping the disk cache at a couple of seed files
+        # instead of one multi-GB snapshot per request. "all" restores the
+        # previous persist-everything behavior.
+        self._disk_exact_scope = os.environ.get(
+            "APC_DISK_EXACT_SCOPE", "pinned"
+        ).lower()
         self.exact_cache_guard_tokens = max(
             1, int(os.environ.get("APC_EXACT_PREFIX_GUARD_TOKENS", "16"))
         )
@@ -3436,6 +3444,11 @@ class APCManager:
         ) or not token_ids:
             return False
         token_tuple = tuple(int(t) for t in token_ids)
+        with self.lock:
+            # Sampled before the session store consumes the flag: marks this
+            # store as the pinned seed prefix, which is the only snapshot
+            # persisted to disk under APC_DISK_EXACT_SCOPE=pinned.
+            pin_pending = self._pin_next_session_store
         copied = _clone_prompt_cache_for_apc(prompt_cache)
         if copied is None:
             types = [type(c).__name__ for c in prompt_cache]
@@ -3492,7 +3505,9 @@ class APCManager:
                     token_len=len(token_tuple),
                     layers=len(copied),
                 )
-        if self.disk is not None:
+        if self.disk is not None and (
+            pin_pending or self._disk_exact_scope == "all"
+        ):
             try:
                 self.disk.save_exact_cache(key, token_tuple, extra_hash, copied)
                 with self.lock:
