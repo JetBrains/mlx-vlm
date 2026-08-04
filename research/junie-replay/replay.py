@@ -59,6 +59,14 @@ def main():
     if not files:
         sys.exit(f"no request files in {args.requests}")
 
+    # Inject warm_up.json as the first request to prime the KV cache with the
+    # cached prompt (uses the "before commit" system prompt). Not counted in stats.
+    warm_up = os.path.join(args.requests, "warm_up.json")
+    if os.path.exists(warm_up):
+        print(f"warming up with {os.path.basename(warm_up)}...", flush=True)
+        post(args.url, warm_up)
+        files = [f for f in files if os.path.basename(f) != "warm_up.json"]
+
     totals = {
         "prompt": 0, "cached": 0, "new": 0, "prompt_ms": 0.0,
         "gen": 0, "gen_ms": 0.0,
