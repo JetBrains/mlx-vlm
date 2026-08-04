@@ -125,6 +125,29 @@ Also note `--draft-kind dflash` routes the server into `_run_speculative`,
 which bypasses BatchGenerator and therefore APC. Do not use for Qwen3.6;
 MTP remains the drafter of choice.
 
+## N-gram draft window tuning on a real session replay
+
+Testkit: 25 consecutive requests from a live Junie session (contexts
+80KB→230KB), replayed in order against the server (APC keeps the session
+warm; only ~400 new prompt tokens total). Sweep of the prompt-lookup base
+window (`MLX_VLM_NGRAM_BASE`, full-accept doubling up to MAX=32):
+
+| base            | session decode tok/s |
+|-----------------|----------------------|
+| 12 (old default)| 29.7                 |
+| 8               | 33.9                 |
+| 6               | 34.5                 |
+| **4 (default)** | **36.1**             |
+| 3               | 35.8                 |
+| 12, MAX=64      | 28.7 (window never exceeded 32) |
+
+Real-session matches accept only ~6 draft tokens per ngram round (vs ~14
+on synthetic verbatim copies), so a 12-token base wasted 6+ verify tokens
+per round on rejected tails (each carries T>1 matmul + GDN-capture cost).
+A small base with fast doubling keeps misses cheap and still streams long
+copies in big blocks — the copy-heavy synthetic also improved (64 → 74
+tok/s). ~47% of all session output tokens arrive via prompt lookup.
+
 Acceptance visibility: the server now logs per-request
 `Speculative decode: request=... kind=mtp rounds=N accepted_tokens_per_round=X accept_rate=Y%`
 (`mlx_vlm/server/generation.py::_log_speculative_stats`), or `engaged=no` if

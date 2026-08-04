@@ -897,7 +897,12 @@ def _make_ngram_lookup(prompt_tokens, batch_size: int):
     n = int(os.environ.get("MLX_VLM_NGRAM_N", "4"))
     max_draft = int(os.environ.get("MLX_VLM_NGRAM_MAX", "32"))
     min_draft = int(os.environ.get("MLX_VLM_NGRAM_MIN", "3"))
-    base_draft = int(os.environ.get("MLX_VLM_NGRAM_BASE", "12"))
+    # Replay of a real 25-request Junie session: mean accepted drafts per
+    # ngram round is ~6, so a small base window wastes far fewer verify
+    # tokens on rejected tails (base 12 -> 4 lifted session decode 29.7 ->
+    # 36.1 tok/s); long verbatim copies still ramp 4->8->16->32 via the
+    # full-accept doubling (copy-heavy replay improved too, 64 -> 74 tok/s).
+    base_draft = int(os.environ.get("MLX_VLM_NGRAM_BASE", "4"))
     if n < 1 or max_draft < min_draft or min_draft < 1 or base_draft < min_draft:
         return None
     return _NgramPromptLookup(
