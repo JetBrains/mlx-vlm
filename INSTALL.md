@@ -30,13 +30,14 @@ The first run takes a while; it automatically:
 3. creates the Python virtualenv and installs dependencies (via `uv`,
    which is itself auto-installed and downloads Python 3.13 if the machine
    has none — the stock macOS `python3` is too old for `mlx>=0.32`),
-4. starts the server and prefills + pins the shared Junie prompt prefix
+4. starts the lightweight API gateway on port 8085 and its inference worker
+   on local-only port 8086, then prefills + pins the shared Junie prompt prefix
    (~12 s; later restarts restore it from disk in ~0.5 s — look for
    `Seed prefix warmed and pinned` in the log).
 
 Every later run skips 1–3 automatically (the descriptor/default are just
-rewritten), so `./start.sh` is also the everyday start command. Stop with
-Ctrl-C.
+rewritten), so `./start.sh` is also the everyday start command. `Ctrl-C`
+stops both processes and releases the model memory.
 
 Then restart Junie — it will use the local model by default. (If
 `~/.junie/settings.json` didn't exist yet, start Junie once and re-run
@@ -83,8 +84,26 @@ are fully KV-cached.)
 | URL | What |
 |---|---|
 | `http://localhost:8085/v1/chat/completions` | OpenAI-compatible chat endpoint (this is what Junie calls); responses include a `timings` block with prefill/decode speeds and speculative-acceptance counters |
-| `http://localhost:8085/health` | liveness check |
-| `http://localhost:8085/v1/cache/stats` | APC stats: sessions, checkpoints, the pinned seed, hit counters |
+| `http://localhost:8085/health` | gateway liveness and worker state |
+| `http://localhost:8085/ready` | `200` only when the worker and model are ready |
+| `http://localhost:8085/metrics` | inference metrics plus gateway process state |
+| `http://localhost:8085/cache/stats` | prompt/KV cache statistics |
+| `POST http://localhost:8085/cache/reset` | clear the in-memory prompt/KV cache |
+| `POST http://localhost:8085/stop_worker` | stop inference and release model memory while keeping the API gateway alive |
+| `POST http://localhost:8085/start_worker` | start the worker and wait until the model is ready |
+
+The gateway stays available if MLX or the worker process crashes. It returns
+`503` for the interrupted request and starts a fresh worker. A manual
+`/stop_worker` is different: it keeps the worker stopped until
+`/start_worker` is called, so a late Junie retry cannot immediately load the
+model again.
+
+Chat requests are batch-only; an incoming `stream: true` is changed to
+`false`. At 270 seconds the worker cancels only that generation and returns
+the partial answer when one exists, or `504` when it produced nothing. If the
+worker cannot stop it by the 275-second hard limit, the gateway restarts the
+worker. Two consecutive worker `500` responses also trigger a restart;
+client errors such as `400` and `422` do not.
 
 ## What to expect in the log
 
