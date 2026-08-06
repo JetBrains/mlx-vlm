@@ -20,6 +20,13 @@ def test_config_file_drives_model_preload(monkeypatch, tmp_path):
     )
     monkeypatch.setenv(config.CONFIG_PATH_ENV, str(path))
     monkeypatch.delenv("MLX_VLM_PRELOAD_MODEL", raising=False)
+
+    # The launcher (python -m mlx_vlm.server.junie) exports the runtime
+    # settings to the env before the server starts; the stock lifespan
+    # preload picks them up from there.
+    launch.initialize_from_config(config.load_config())
+    assert os.environ["MLX_VLM_PRELOAD_MODEL"] == "test-model"
+
     calls = []
 
     def fake_get_cached_model(model_path, adapter_path=None, *, model_kind="auto"):
@@ -85,7 +92,7 @@ def test_m5_mac_uses_int8_prefill(monkeypatch):
 def test_gateway_owns_auto_unload(monkeypatch):
     monkeypatch.setenv("MLX_VLM_AUTO_UNLOAD_TIME", "60")
 
-    config.apply_config_to_env(config.DEFAULT_CONFIG)
+    launch.apply_config_to_env(config.DEFAULT_CONFIG)
 
     assert "MLX_VLM_AUTO_UNLOAD_TIME" not in os.environ
 

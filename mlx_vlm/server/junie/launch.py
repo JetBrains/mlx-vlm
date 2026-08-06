@@ -1,11 +1,12 @@
 """Launch the server from the persistent config file.
 
-``python -m mlx_vlm.server.junie`` reads ``JUNIE_SERVER_CONFIG`` and turns
-the launch-time settings (host/port, prefill tuning, seed request, ...)
-into the equivalent ``mlx_vlm.server`` command line — so start.sh stays a
-dumb bootstrapper and every serving setting lives in one file. Runtime
-settings (model, KV quantization, ...) keep flowing through the lifespan
-config read as before.
+``python -m mlx_vlm.server.junie`` reads ``JUNIE_SERVER_CONFIG`` once and
+turns it into the stock server's inputs: the launch-time settings
+(host/port, prefill tuning, seed request, ...) become the equivalent
+``mlx_vlm.server`` command line, and the runtime settings (model/drafter,
+context length, KV quantization, ...) are exported as env vars — so
+start.sh stays a dumb bootstrapper and every serving setting lives in one
+file.
 
 Extra command-line arguments are appended after the config-derived ones
 (argparse last-wins), so ad-hoc overrides still work:
@@ -26,6 +27,8 @@ from .parent_watchdog import start_parent_watchdog
 
 
 logger = logging.getLogger("mlx_vlm.server")
+
+DEFAULT_KV_QUANT_BITS = 8
 
 
 def _apple_chip_generation() -> Optional[int]:
@@ -50,6 +53,49 @@ def _default_seed_request() -> Optional[str]:
     repo_root = Path(__file__).resolve().parents[3]
     path = repo_root / "research" / "junie.json"
     return str(path) if path.is_file() else None
+
+
+def apply_config_to_env(cfg: dict) -> None:
+    """Translate config values into the environment read by the worker."""
+
+    def set_or_unset(name, value):
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = str(value)
+
+    set_or_unset("MLX_VLM_PRELOAD_MODEL", cfg.get("model_name"))
+    set_or_unset("MLX_VLM_DRAFT_MODEL", cfg.get("draft_model"))
+    set_or_unset(
+        "MLX_VLM_DRAFT_KIND",
+        cfg.get("draft_kind") if cfg.get("draft_model") else None,
+    )
+    set_or_unset("MAX_KV_SIZE", cfg.get("max_context_length"))
+    set_or_unset(
+        "KV_BITS",
+        DEFAULT_KV_QUANT_BITS if cfg.get("kv_quantization") else None,
+    )
+    # The gateway owns idle timing and stops the whole worker process.
+    os.environ.pop("MLX_VLM_AUTO_UNLOAD_TIME", None)
+
+
+def initialize_from_config(cfg: dict) -> None:
+    """Export the runtime settings from the config to the env.
+
+    Called before the server starts, so the config file — not command-line
+    flags — decides which model to serve and with which settings.
+    """
+    logger.info(
+        "Config: %s -> model=%s draft=%s max_context_length=%s "
+        "kv_quantization=%s auto_unload_time=%s",
+        config_path(),
+        cfg.get("model_name"),
+        cfg.get("draft_model"),
+        cfg.get("max_context_length"),
+        cfg.get("kv_quantization"),
+        cfg.get("auto_unload_time"),
+    )
+    apply_config_to_env(cfg)
 
 
 def apply_inference_env(cfg: dict) -> None:
@@ -119,6 +165,7 @@ def main() -> None:
         # JUNIE_SERVER_CONFIG not set: fall back to stock flag behavior.
         cli_main()
         return
+    initialize_from_config(cfg)
     apply_inference_env(cfg)
     sys.argv = [sys.argv[0], *build_argv(cfg), *sys.argv[1:]]
     cli_main()
