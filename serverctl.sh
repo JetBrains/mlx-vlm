@@ -16,12 +16,14 @@ set -euo pipefail
 #   ./serverctl.sh stop
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if command -v python3 >/dev/null 2>&1; then
+if [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+  PYTHON="$SCRIPT_DIR/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
   PYTHON=python3
 elif command -v python >/dev/null 2>&1; then
   PYTHON=python
 else
-  echo "ERROR: Python is required to read config and format JSON." >&2
+  echo "ERROR: Python environment is missing; run ./start.sh first." >&2
   exit 1
 fi
 
