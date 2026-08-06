@@ -19,8 +19,8 @@ RESTART_SETTING_KEYS = {
 DEFAULT_PUBLIC_SETTINGS = {
     "model_name": "mlx-community/Qwen3.6-27B-4bit",
     "max_context_length": None,
-    "kv_quantization": False,
-    "auto_unload_time": None,
+    "kv_quantization": True,
+    "auto_unload_time": 600,
 }
 DEFAULT_DRAFT_MODEL = "mlx-community/Qwen3.6-27B-MTP-4bit"
 

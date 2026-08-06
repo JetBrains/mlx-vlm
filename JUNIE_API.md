@@ -57,8 +57,8 @@ auto-unloaded worker is represented as `phase: "ready"` with
 {
   "model_name": "mlx-community/Qwen3.6-27B-4bit",
   "max_context_length": null,
-  "kv_quantization": false,
-  "auto_unload_time": null
+  "kv_quantization": true,
+  "auto_unload_time": 600
 }
 ```
 
@@ -88,7 +88,7 @@ auto-unloaded worker is represented as `phase: "ready"` with
   "settings": {
     "model_name": "mlx-community/Qwen3.6-27B-4bit",
     "max_context_length": null,
-    "kv_quantization": false,
+    "kv_quantization": true,
     "auto_unload_time": 600
   }
 }

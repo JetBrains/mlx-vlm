@@ -241,7 +241,7 @@ def test_apply_auto_unload_time_without_restarting_worker(monkeypatch, tmp_path)
             "settings": {
                 "model_name": "demo",
                 "max_context_length": None,
-                "kv_quantization": False,
+                "kv_quantization": True,
                 "auto_unload_time": 600,
             },
         }

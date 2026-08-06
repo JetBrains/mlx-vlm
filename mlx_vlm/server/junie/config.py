@@ -28,13 +28,12 @@ DEFAULT_CONFIG = {
     "draft_model": "mlx-community/Qwen3.6-27B-MTP-4bit",
     "draft_kind": "mtp",
     "max_context_length": None,
-    "kv_quantization": False,
-    "auto_unload_time": None,
+    "kv_quantization": True,
+    "auto_unload_time": 600,
     # --- Launch settings (read once by `python -m mlx_vlm.server.junie`;
     # edit by hand while the server is stopped). ---
-    # Localhost only by default — the server has no auth unless --api-key
-    # is set; use "0.0.0.0" to expose it on the network.
-    "host": "127.0.0.1",
+    # start.sh overrides this for the private worker in gateway mode.
+    "host": "0.0.0.0",
     "port": 19239,
     # W8A8 int8 prefill on the M5 neural accelerators (research/int8-nax).
     "int8_prefill": True,
@@ -58,8 +57,8 @@ DEFAULT_CONFIG = {
     # including one before a mid-history edit).
     "apc_enabled": True,
     # Concurrent conversations kept warm / resumable positions each.
-    "apc_exact_sessions": 2,
-    "apc_session_checkpoints": 8,
+    "apc_exact_sessions": 4,
+    "apc_session_checkpoints": 15,
     # Disk tier for the pinned seed snapshot (survives restarts). null =
     # "apc-cache" next to this config file; "" disables the disk tier.
     "apc_disk_path": None,
