@@ -154,7 +154,6 @@ case "$command" in
   health) get /health ;;
   metrics) get /metrics ;;
   cache-stats) get /v1/cache/stats ;;
-  cache-reset) post /v1/cache/reset ;;
   models) get /v1/models ;;
   unload) post /unload ;;
   *) usage ;;

@@ -699,11 +699,6 @@ def create_app(
     async def cache_stats(request: Request):
         return _proxy_response(await management_proxy(request, "GET", "/cache/stats"))
 
-    @app.post("/cache/reset")
-    @app.post("/v1/cache/reset", include_in_schema=False)
-    async def cache_reset(request: Request):
-        return _proxy_response(await management_proxy(request, "POST", "/cache/reset"))
-
     @app.post("/shutdown")
     @app.post("/v1/shutdown", include_in_schema=False)
     async def shutdown(request: Request):

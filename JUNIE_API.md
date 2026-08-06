@@ -145,7 +145,6 @@ private worker port is already occupied.
   stopped or loading.
 - `GET /metrics`: worker metrics plus a `gateway` block.
 - `GET /cache/stats`: prompt-cache statistics.
-- `POST /cache/reset`: clear the worker prompt cache.
 
 Worker-only monitoring endpoints return `503` while the worker is stopped.
 

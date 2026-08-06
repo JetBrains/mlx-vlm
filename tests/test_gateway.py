@@ -129,8 +129,6 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
             )
         if request.url.path == "/cache/stats":
             return httpx.Response(200, json={"enabled": True})
-        if request.url.path == "/cache/reset":
-            return httpx.Response(200, json={"status": "cleared"})
         if request.url.path == "/v1/models":
             return httpx.Response(
                 200,
@@ -165,8 +163,8 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
         }
         assert client.get("/cache/stats").json() == {"enabled": True}
         assert client.get("/v1/cache/stats").json() == {"enabled": True}
-        assert client.post("/cache/reset").json() == {"status": "cleared"}
-        assert client.post("/v1/cache/reset").json() == {"status": "cleared"}
+        assert client.post("/cache/reset").status_code == 404
+        assert client.post("/v1/cache/reset").status_code == 404
         assert client.get("/v1/models").json()["data"][0]["id"] == "demo"
 
         assert client.post("/unload").json() == {

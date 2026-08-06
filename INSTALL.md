@@ -92,7 +92,6 @@ are fully KV-cached.)
 | `http://localhost:8085/health` | cheap gateway liveness, even while the worker is stopped |
 | `http://localhost:8085/metrics` | inference metrics plus gateway process state |
 | `http://localhost:8085/cache/stats` | prompt/KV cache statistics |
-| `POST http://localhost:8085/cache/reset` | clear the in-memory prompt/KV cache |
 
 The gateway stays available if MLX or the worker process crashes. It returns
 `503` for the interrupted request and starts a fresh worker. A manual
