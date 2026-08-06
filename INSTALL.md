@@ -41,7 +41,7 @@ The project is installed editable, so the `junie-mlx-vlm` it puts in
 
 `serverctl.sh start` is the entrypoint in both worlds: it runs that
 `junie-mlx-vlm` from a checkout, and the frozen one from
-`build_cli_tarball.sh` beside it on a shipped machine. It returns
+`build_server.sh` beside it on a shipped machine. It returns
 immediately and leaves the daemon running in the background.
 
 The daemon reads every setting from `server-config.json`, serves the public

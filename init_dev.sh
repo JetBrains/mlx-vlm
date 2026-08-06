@@ -9,7 +9,7 @@ set -euo pipefail
 # editable, so ./.venv/bin/junie-mlx-vlm runs these sources, not a copy.
 #
 # Shipped machines need none of this: the frozen junie-mlx-vlm from
-# build_cli_tarball.sh carries its own interpreter and dependencies.
+# build_server.sh carries its own interpreter and dependencies.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"

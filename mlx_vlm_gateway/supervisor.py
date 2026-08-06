@@ -28,7 +28,7 @@ CLI_MODULE = "mlx_vlm_gateway.cli"
 def worker_command() -> tuple[str, ...]:
     """The command line that starts the inference worker.
 
-    Frozen (build_cli_tarball.sh) there is a single executable and
+    Frozen (build_server.sh) there is a single executable and
     ``sys.executable`` is it, so the worker is this same program with the
     "worker" subcommand. From a checkout that subcommand is reached
     through ``-m`` instead, on a real interpreter.

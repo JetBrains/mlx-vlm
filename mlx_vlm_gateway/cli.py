@@ -1,7 +1,7 @@
 """The ``junie-mlx-vlm`` entry point: the daemon, or the worker it spawns.
 
 Both processes are reachable through one program because the frozen
-bundle (build_cli_tarball.sh) holds exactly one executable, which the
+bundle (build_server.sh) holds exactly one executable, which the
 daemon re-invokes with the "worker" subcommand — see
 :func:`mlx_vlm_gateway.supervisor.worker_command`. One dispatch path,
 frozen or not.
