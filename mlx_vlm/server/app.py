@@ -14,6 +14,7 @@ from typing import List, Optional, Tuple
 import mlx.core as mx
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from huggingface_hub import scan_cache_dir
 from huggingface_hub.errors import CacheNotFound, RepositoryNotFoundError
 
@@ -147,6 +148,10 @@ def _server_runtime_snapshot() -> dict:
             _infer_tool_parser_from_processor(processor) if processor else None
         ),
         "continuous_batching_enabled": runtime.response_generator is not None,
+        "generation_thread_alive": bool(
+            runtime.response_generator is not None
+            and getattr(runtime.response_generator, "is_alive", lambda: True)()
+        ),
         "request_queue_depth": queue_depth,
         "audio_queue_depth": audio_queue_depth,
         "apc": (
@@ -469,6 +474,10 @@ async def lifespan(app):
         if runtime.audio_queue is not None:
             runtime.audio_queue.stop_and_join()
             runtime.audio_queue = None
+        try:
+            unload_model_sync()
+        except Exception:
+            logger.exception("Failed to cleanly unload inference resources")
 
 
 app = FastAPI(
@@ -518,6 +527,9 @@ def _unload_model_cache_group(cache_group: str) -> bool:
     apc_manager = cache.get("apc_manager")
     if apc_manager is not None:
         apc_manager.clear()
+        close = getattr(apc_manager, "close", None)
+        if callable(close):
+            close()
         if runtime.apc_manager is apc_manager:
             runtime.apc_manager = None
 
@@ -917,8 +929,29 @@ async def health_check(request: Request):
         "effective_context_limit": runtime["effective_context_limit"],
         "loaded_tool_parser": runtime["loaded_tool_parser"],
         "continuous_batching_enabled": runtime["continuous_batching_enabled"],
+        "generation_thread_alive": runtime["generation_thread_alive"],
         "apc_enabled": runtime["apc"]["enabled"],
     }
+
+
+@app.get("/ready")
+async def readiness_check(request: Request):
+    """Report whether the preloaded model and its GPU thread can serve requests."""
+    _require_management_api_key(request)
+    snapshot = _server_runtime_snapshot()
+    ready = bool(
+        snapshot["loaded_model"]
+        and snapshot["continuous_batching_enabled"]
+        and snapshot["generation_thread_alive"]
+    )
+    return JSONResponse(
+        {
+            "status": "ready" if ready else "not_ready",
+            "loaded_model": snapshot["loaded_model"],
+            "generation_thread_alive": snapshot["generation_thread_alive"],
+        },
+        status_code=200 if ready else 503,
+    )
 
 
 @app.get("/metrics")

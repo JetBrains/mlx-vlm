@@ -4022,6 +4022,31 @@ def test_metrics_endpoint_reports_empty_state(client, monkeypatch):
     assert payload["server"]["apc"] == {"enabled": False}
 
 
+def test_ready_requires_loaded_model_and_live_generation_thread(client, monkeypatch):
+    registry = server.ModelCacheRegistry()
+    registry.set(
+        "text_generation",
+        {
+            "model_path": "demo-model",
+            "processor": SimpleNamespace(),
+            "config": SimpleNamespace(text_config=None),
+        },
+    )
+    generator = SimpleNamespace(is_alive=lambda: True, requests=Queue())
+    monkeypatch.setattr(server.runtime, "model_cache", registry)
+    monkeypatch.setattr(server.runtime, "response_generator", generator)
+    monkeypatch.setattr(server.runtime, "apc_manager", None)
+
+    response = client.get("/ready")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+
+    generator.is_alive = lambda: False
+    response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+
+
 def test_metrics_store_logs_request_lifecycle(caplog):
     caplog.set_level(logging.INFO, logger="mlx_vlm.server")
     metrics = server.ServerMetricsStore()
