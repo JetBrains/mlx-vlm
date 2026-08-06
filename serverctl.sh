@@ -11,10 +11,40 @@ set -euo pipefail
 #   ./serverctl.sh apply auto_unload_time=600
 #   ./serverctl.sh apply kv_quantization=true force=true
 #   ./serverctl.sh wait
+#   ./serverctl.sh models
+#   ./serverctl.sh unload
 #   ./serverctl.sh stop
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PORT="${PORT:-8085}"
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+  PYTHON=python
+else
+  echo "ERROR: Python is required to read config and format JSON." >&2
+  exit 1
+fi
+
+CONFIG_PATH="$HOME/.local/share/junie-local/server-config.json"
+CONFIG_PORT=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON" - "$CONFIG_PATH" <<'PY'
+import json
+import sys
+
+from mlx_vlm_shared.server_settings import normalize_config
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        raw = json.load(stream)
+    if not isinstance(raw, dict):
+        raw = {}
+except (OSError, ValueError):
+    raw = {}
+
+config, _ = normalize_config(raw)
+print(config["port"])
+PY
+)
+PORT="${PORT:-$CONFIG_PORT}"
 BASE="http://127.0.0.1:$PORT"
 CURL=(curl -sS --fail-with-body -m 30)
 
@@ -22,15 +52,6 @@ usage() {
   sed -n '/^# Examples:/,/^$/{s/^# \{0,1\}//p;}' "${BASH_SOURCE[0]}"
   exit 1
 }
-
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON=python3
-elif command -v python >/dev/null 2>&1; then
-  PYTHON=python
-else
-  echo "ERROR: Python is required to format JSON." >&2
-  exit 1
-fi
 
 pretty() { "$PYTHON" -m json.tool; }
 get() { "${CURL[@]}" "$BASE$1" | pretty; }
@@ -132,5 +153,7 @@ case "$command" in
   metrics) get /metrics ;;
   cache-stats) get /v1/cache/stats ;;
   cache-reset) post /v1/cache/reset ;;
+  models) get /v1/models ;;
+  unload) post /unload ;;
   *) usage ;;
 esac

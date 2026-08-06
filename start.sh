@@ -8,7 +8,7 @@ set -euo pipefail
 #   1) model weights   -> downloaded/verified into ~/.local/share/junie-local
 #   2) Junie descriptor -> written to ~/.junie/models
 #   3) python venv      -> created at ./.venv on first run
-#   4) gateway          -> public API on port 8085
+#   4) gateway          -> public API on host/port from server-config.json
 #      worker           -> private inference process on port 8086
 #
 # Steps 1-3 are no-ops when already done, so this is also the everyday
@@ -21,7 +21,8 @@ cd "$SCRIPT_DIR"
 # repo dir (gitignored; truncated on each start).
 exec > >(tee "$SCRIPT_DIR/mlx_server.log") 2>&1
 
-PORT=8085
+HOST=0.0.0.0
+PORT=19239
 WORKER_PORT=8086
 MODEL_ID="mlx-community/Qwen3.6-27B-4bit"
 # Multi-token-prediction speculative-decoding drafter for the model above.
@@ -45,6 +46,31 @@ BASE_DIR="$HOME/.local/share/junie-local"
 MODELS_DIR="$BASE_DIR/models"
 DOWNLOAD_DIR="$BASE_DIR/incomplete_downloads"
 export JUNIE_SERVER_CONFIG="$BASE_DIR/server-config.json"
+
+# host/port belong to the public gateway. Read them with the same lightweight
+# validation code used by gateway and worker; a missing/broken file uses the
+# existing defaults and will be normalized when the gateway starts.
+if command -v python3 >/dev/null 2>&1; then
+  CONFIG_ADDRESS="$(python3 - "$JUNIE_SERVER_CONFIG" <<'PY'
+import json
+import sys
+
+from mlx_vlm_shared.server_settings import normalize_config
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        raw = json.load(stream)
+    if not isinstance(raw, dict):
+        raw = {}
+except (OSError, ValueError):
+    raw = {}
+
+config, _ = normalize_config(raw)
+print(f'{config["host"]}\t{config["port"]}')
+PY
+)"
+  IFS=$'\t' read -r HOST PORT <<< "$CONFIG_ADDRESS"
+fi
 
 MODEL_ZIP_1="models--mlx-community--Qwen3.6-27B-4bit.zip"
 MODEL_SHA256_1="adf7f8d832ed994dcc6d09372036b4d12f49a4ccda066179cc64dc2dd113f91d"
@@ -255,6 +281,32 @@ if [ ! -x "$PYTHON_BIN" ]; then
   PYTHON_BIN="python3"
 fi
 
+if [ "$PORT" = "$WORKER_PORT" ]; then
+  echo "ERROR: Public gateway port $PORT conflicts with private worker port $WORKER_PORT." >&2
+  exit 1
+fi
+
+check_port_available() {
+  "$PYTHON_BIN" - "$1" "$2" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind((host, port))
+except OSError as exc:
+    raise SystemExit(f"ERROR: Cannot listen on {host}:{port}: {exc}")
+finally:
+    sock.close()
+PY
+}
+
+check_port_available "$HOST" "$PORT"
+check_port_available 127.0.0.1 "$WORKER_PORT"
+
 # Model, drafter, prefill, prompt/KV cache and warmup settings come from
 # JUNIE_SERVER_CONFIG through mlx_vlm.server.junie. The gateway keeps the
 # worker transport private on localhost port 8086.
@@ -265,7 +317,7 @@ fi
 export MLX_VLM_SOFT_REQUEST_TIMEOUT=270
 
 exec "$PYTHON_BIN" -m mlx_vlm_gateway \
-  --host 0.0.0.0 \
+  --host "$HOST" \
   --port "$PORT" \
   --worker-url "http://127.0.0.1:$WORKER_PORT" \
   --startup-timeout 120 \

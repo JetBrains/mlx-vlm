@@ -1,6 +1,7 @@
 # Junie local gateway API
 
-The public server is the lightweight gateway at `http://localhost:8085`.
+The public server is the lightweight gateway at `http://localhost:19239` by
+default. Its `host` and `port` come from `server-config.json`.
 The inference worker is private on `127.0.0.1:8086` and may be restarted or
 stopped without taking the gateway down.
 The worker also watches its parent process and exits if the gateway crashes,
@@ -124,10 +125,20 @@ settings atomically updates the same file and the in-memory copy; a restarted
 worker reads that file once. Manual file edits therefore require a gateway
 restart.
 
+`host` and `port` are launch settings rather than `/apply_settings` fields,
+because changing the gateway's own listening socket requires restarting the
+gateway. Stop it, edit the same `server-config.json`, and run `./start.sh`
+again. Startup fails with a clear error if either the requested public port or
+private worker port is already occupied.
+
 ## Shutdown and monitoring
 
 - `POST /shutdown`: stop the worker, release model memory, then terminate the
   gateway. Response: `{"status":"shutting_down"}`.
+- `POST /unload`: stop the worker and release model memory while keeping the
+  gateway available. The next inference request starts a fresh worker.
+- `GET /v1/models`: return the worker's OpenAI-compatible local model list;
+  it remains available from gateway memory after `/unload`.
 - `GET /health`: cheap gateway liveness. It remains `200` while the worker is
   stopped or loading.
 - `GET /metrics`: worker metrics plus a `gateway` block.
