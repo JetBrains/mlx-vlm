@@ -70,6 +70,7 @@ def _gateway(monkeypatch, handler, **settings_overrides):
         probe_timeout_s=0.1,
         restart_delay_s=0.01,
         shutdown_timeout_s=0.1,
+        idle_check_interval_s=0.01,
     )
     setting_values.update(settings_overrides)
     settings = GatewaySettings(**setting_values)
@@ -219,6 +220,32 @@ def test_apply_auto_unload_time_without_restarting_worker(monkeypatch, tmp_path)
         }
         assert len(processes) == 1
         assert json.loads(config_path.read_text())["internal"] == 7
+
+
+def test_auto_unload_stops_idle_worker(monkeypatch, tmp_path):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(
+        json.dumps({"model_name": "demo", "auto_unload_time": 1})
+    )
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(
+                200,
+                json={"status": "ready", "loaded_model": "demo"},
+            )
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+        app.state.supervisor.last_activity_at -= 2
+        _wait_until(lambda: processes[0].returncode is not None)
+
+        status = client.get("/status").json()
+        assert status["phase"] == "ready"
+        assert status["model"]["loaded"] is False
+        assert app.state.supervisor.desired_running is False
 
 
 def test_apply_restart_setting_rejects_busy_request_without_force(

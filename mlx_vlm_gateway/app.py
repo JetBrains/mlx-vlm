@@ -31,6 +31,7 @@ class GatewaySettings:
     probe_failures_before_restart: int = 3
     restart_delay_s: float = 2.0
     shutdown_timeout_s: float = 5.0
+    idle_check_interval_s: float = 1.0
     config_path: Optional[str] = None
 
 
@@ -56,6 +57,7 @@ class WorkerSupervisor:
         self.requests_failed = 0
         self.active_requests = 0
         self.generation = 0
+        self.last_activity_at = time.monotonic()
         self._started_at = time.monotonic()
         self._spawned_at: Optional[float] = None
         self._ready_event = asyncio.Event()
@@ -237,6 +239,8 @@ class WorkerSupervisor:
                 ready = await self._probe()
                 if ready:
                     failed_probes = 0
+                    if self.state != "ready":
+                        self.last_activity_at = time.monotonic()
                     self.state = "ready"
                     self._ready_event.set()
                     continue
@@ -331,6 +335,35 @@ def create_app(
     settings: GatewaySettings,
     client_factory: Optional[Callable[[httpx.Timeout], httpx.AsyncClient]] = None,
 ) -> FastAPI:
+    async def stop_idle_worker(app: FastAPI) -> None:
+        while True:
+            await asyncio.sleep(settings.idle_check_interval_s)
+            sup = app.state.supervisor
+            timeout_s = app.state.settings_store.current()["auto_unload_time"]
+            if (
+                timeout_s is None
+                or sup.state != "ready"
+                or sup.active_requests > 0
+                or time.monotonic() - sup.last_activity_at < timeout_s
+            ):
+                continue
+            lock = app.state.lifecycle_lock
+            if lock.locked():
+                continue
+            async with lock:
+                timeout_s = app.state.settings_store.current()["auto_unload_time"]
+                if (
+                    timeout_s is not None
+                    and sup.state == "ready"
+                    and sup.active_requests == 0
+                    and time.monotonic() - sup.last_activity_at >= timeout_s
+                ):
+                    logger.info(
+                        "Stopping inference worker after %ss without requests",
+                        timeout_s,
+                    )
+                    await sup.stop_worker()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         timeout = httpx.Timeout(
@@ -350,9 +383,18 @@ def create_app(
         app.state.settings_store = SettingsStore(settings.config_path)
         app.state.lifecycle_lock = asyncio.Lock()
         await supervisor.open()
+        idle_task = asyncio.create_task(
+            stop_idle_worker(app),
+            name="mlx-vlm-idle-worker-stop",
+        )
         try:
             yield
         finally:
+            idle_task.cancel()
+            try:
+                await idle_task
+            except asyncio.CancelledError:
+                pass
             await supervisor.close()
             await client.aclose()
 
@@ -549,6 +591,7 @@ def create_app(
 
         sup.requests_forwarded += 1
         sup.active_requests += 1
+        sup.last_activity_at = time.monotonic()
         worker_generation = sup.generation
         try:
             response = await request.app.state.client.post(
@@ -578,6 +621,7 @@ def create_app(
             ) from exc
         finally:
             sup.active_requests = max(0, sup.active_requests - 1)
+            sup.last_activity_at = time.monotonic()
 
         if sup.record_worker_response(
             response.status_code,
