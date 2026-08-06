@@ -9,9 +9,9 @@ import time
 import httpx
 from fastapi.testclient import TestClient
 
-import mlx_vlm_gateway.app as gateway_module
+import mlx_vlm_gateway.supervisor as supervisor_module
 from mlx_vlm_gateway.app import GatewaySettings, create_app
-from mlx_vlm_gateway.app import GATEWAY_PID_ENV
+from mlx_vlm_gateway.supervisor import GATEWAY_PID_ENV
 
 
 class FakeProcess:
@@ -59,11 +59,11 @@ def _gateway(
             process.kill()
 
     monkeypatch.setattr(
-        gateway_module.asyncio,
+        supervisor_module.asyncio,
         "create_subprocess_exec",
         fake_create_subprocess,
     )
-    monkeypatch.setattr(gateway_module.os, "killpg", fake_killpg, raising=False)
+    monkeypatch.setattr(supervisor_module.os, "killpg", fake_killpg, raising=False)
 
     transport = httpx.MockTransport(handler)
 
@@ -621,7 +621,7 @@ def test_process_spawn_failures_leave_gateway_available(monkeypatch):
         raise FileNotFoundError("worker executable missing")
 
     monkeypatch.setattr(
-        gateway_module.asyncio,
+        supervisor_module.asyncio,
         "create_subprocess_exec",
         fail_to_spawn,
     )
@@ -672,7 +672,7 @@ def test_request_retries_worker_after_startup_cooldown(monkeypatch):
         return process
 
     monkeypatch.setattr(
-        gateway_module.asyncio,
+        supervisor_module.asyncio,
         "create_subprocess_exec",
         recover_on_fourth_spawn,
     )
