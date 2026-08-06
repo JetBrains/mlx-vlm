@@ -31,6 +31,7 @@ class GatewaySettings:
     probe_timeout_s: float = 2.0
     probe_failures_before_restart: int = 3
     max_start_failures: int = 3
+    startup_retry_cooldown_s: float = 30.0
     restart_delay_s: float = 2.0
     shutdown_timeout_s: float = 5.0
     idle_check_interval_s: float = 1.0
@@ -63,6 +64,7 @@ class WorkerSupervisor:
         self.last_activity_at = time.monotonic()
         self._started_at = time.monotonic()
         self._spawned_at: Optional[float] = None
+        self._startup_retry_not_before: Optional[float] = None
         self._ready_event = asyncio.Event()
         self._operation_lock = asyncio.Lock()
         self._monitor_task: Optional[asyncio.Task] = None
@@ -127,7 +129,11 @@ class WorkerSupervisor:
 
     async def start_worker(self, *, wait_ready: bool = True) -> dict:
         if self.state == "error":
-            raise RuntimeError(self.last_error or "Worker is in error state")
+            if not self.startup_retry_due():
+                raise RuntimeError(self.last_error or "Worker is in error state")
+            logger.info("Retrying inference worker after startup cooldown")
+            self._startup_retry_not_before = None
+            self.state = "stopped"
         if not self.desired_running or self.state == "stopped":
             self.start_failures = 0
         self.desired_running = True
@@ -135,6 +141,13 @@ class WorkerSupervisor:
         if wait_ready:
             await self.wait_until_ready()
         return self.snapshot()
+
+    def startup_retry_due(self) -> bool:
+        return (
+            self.state == "error"
+            and self._startup_retry_not_before is not None
+            and time.monotonic() >= self._startup_retry_not_before
+        )
 
     async def wait_until_ready(self) -> None:
         if self.state == "ready":
@@ -339,6 +352,10 @@ class WorkerSupervisor:
             async with self._operation_lock:
                 await self._terminate_locked()
                 self.state = "error" if self.desired_running else "stopped"
+                if self.state == "error":
+                    self._startup_retry_not_before = (
+                        time.monotonic() + self.settings.startup_retry_cooldown_s
+                    )
                 self._ready_event.set()
             return
         self.state = "restarting"
@@ -741,13 +758,10 @@ def create_app(
                 status_code=503,
                 detail="Model serving is unavailable: server phase is 'stopping'.",
             )
-        if sup.state == "error":
+        if sup.state == "error" and not sup.startup_retry_due():
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "Inference worker is in error state; change restart settings "
-                    "or restart the gateway."
-                ),
+                detail="Inference worker is recovering; please retry shortly.",
             )
         try:
             payload = await request.json()

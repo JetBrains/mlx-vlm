@@ -592,12 +592,57 @@ def test_process_spawn_failures_leave_gateway_available(monkeypatch):
             response = client.post("/v1/chat/completions", json={})
             assert response.status_code == 503
             assert response.json()["detail"] == (
-                "Inference worker is in error state; change restart settings "
-                "or restart the gateway."
+                "Inference worker is recovering; please retry shortly."
             )
 
         time.sleep(0.08)
         assert spawn_attempts == 3
+
+
+def test_request_retries_worker_after_startup_cooldown(monkeypatch):
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(200, json={"choices": []})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(
+        monkeypatch,
+        handler,
+        max_start_failures=3,
+        startup_retry_cooldown_s=0.03,
+    )
+    spawn_attempts = 0
+
+    async def recover_on_fourth_spawn(*_args, **_kwargs):
+        nonlocal spawn_attempts
+        spawn_attempts += 1
+        if spawn_attempts <= 3:
+            raise OSError("temporary startup failure")
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(
+        gateway_module.asyncio,
+        "create_subprocess_exec",
+        recover_on_fourth_spawn,
+    )
+
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "error")
+        assert spawn_attempts == 3
+
+        assert client.post("/v1/chat/completions", json={}).status_code == 503
+        time.sleep(0.05)
+        assert spawn_attempts == 3
+
+        response = client.post("/v1/chat/completions", json={})
+
+        assert response.status_code == 200
+        assert spawn_attempts == 4
+        assert client.get("/status").json()["phase"] == "ready"
 
 
 def test_422_between_500_responses_resets_restart_counter(monkeypatch):
