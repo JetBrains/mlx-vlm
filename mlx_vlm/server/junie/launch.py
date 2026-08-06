@@ -137,6 +137,14 @@ def build_argv(cfg: dict) -> List[str]:
         str(cfg.get("port") or DEFAULT_CONFIG["port"]),
         "--prefill-step-size",
         str(cfg.get("prefill_step_size") or DEFAULT_CONFIG["prefill_step_size"]),
+        # Quantize the KV cache from token 0 when kv_quantization is on
+        # (the stock default, 5000, keeps contexts below that threshold
+        # fp16 — pointless for Junie, whose requests are all 10k+, and it
+        # creates a second, undertested fp16/quantized regime). Ignored
+        # when KV_BITS is unset. Must be a flag, not an env export:
+        # cli.py writes QUANTIZED_KV_START from the flag unconditionally.
+        "--quantized-kv-start",
+        "0",
     ]
     if cfg.get("int8_prefill") and (_apple_chip_generation() or 0) >= 5:
         argv.append("--int8-prefill")

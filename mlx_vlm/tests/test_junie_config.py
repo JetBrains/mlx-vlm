@@ -68,6 +68,8 @@ def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
         "12345",
         "--prefill-step-size",
         "2048",
+        "--quantized-kv-start",
+        "0",
     ]
 
     launch.apply_inference_env(cfg)
