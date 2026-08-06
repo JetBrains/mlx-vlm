@@ -2519,6 +2519,82 @@ def test_chat_completions_endpoint_forwards_explicit_sampling_args(client):
     assert mock_generate.call_args.kwargs["resize_shape"] == (512, 512)
 
 
+@pytest.mark.parametrize(
+    ("partial_text", "expected_status"),
+    [("partial answer", 200), (None, 504)],
+)
+def test_chat_completions_soft_timeout_cancels_generation_before_response(
+    client, monkeypatch, partial_text, expected_status
+):
+    model = SimpleNamespace()
+    processor = SimpleNamespace()
+    config = SimpleNamespace(model_type="qwen2_vl")
+    cancelled = Event()
+
+    class BlockingIterator:
+        def __init__(self):
+            self.emitted = False
+            self.closed = False
+            self.lock = Lock()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if partial_text is not None and not self.emitted:
+                self.emitted = True
+                return server.StreamingToken(
+                    text=partial_text,
+                    token=1,
+                    logprobs=0.0,
+                    finish_reason=None,
+                )
+            cancelled.wait(timeout=1.0)
+            raise StopIteration
+
+        def close(self, *, wait=False, timeout=None):
+            del wait, timeout
+            with self.lock:
+                self.closed = True
+            cancelled.set()
+            return True
+
+    token_iter = BlockingIterator()
+
+    class FakeResponseGenerator:
+        tokenizer = SimpleNamespace(decode=lambda tokens: "")
+
+        def validate_context_budget(self, prompt, images=None, audio=None, args=None):
+            return None
+
+        def generate(self, prompt, images=None, audio=None, args=None):
+            return server.GenerationContext(uid=1, prompt_tokens=8), token_iter
+
+    monkeypatch.setenv("MLX_VLM_SOFT_REQUEST_TIMEOUT", "0.02")
+    monkeypatch.setattr(server.runtime, "response_generator", FakeResponseGenerator())
+
+    with (
+        patch.object(
+            server, "get_cached_model", return_value=(model, processor, config)
+        ),
+        patch.object(server, "apply_chat_template", return_value="prompt"),
+    ):
+        response = client.post(
+            "/chat/completions",
+            json={
+                "model": "demo",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": False,
+            },
+        )
+
+    assert response.status_code == expected_status
+    assert cancelled.is_set()
+    assert token_iter.closed
+    if partial_text is not None:
+        assert response.json()["choices"][0]["message"]["content"] == partial_text
+
+
 def test_chat_completions_streaming_forwards_explicit_sampling_args(
     client, monkeypatch
 ):
@@ -4480,6 +4556,24 @@ class TestResponseGenerator:
         thread.join(timeout=1.0)
         assert not thread.is_alive()
         assert isinstance(result[0], StopIteration)
+
+    def test_token_iterator_close_can_wait_for_gpu_cancellation(self):
+        calls = []
+
+        def cancel_and_wait(uid, timeout):
+            calls.append((uid, timeout))
+            return True
+
+        token_iter = server_generation._TokenIterator(
+            Queue(),
+            "req-1",
+            lambda uid: None,
+            None,
+            cancel_and_wait,
+        )
+
+        assert token_iter.close(wait=True, timeout=2.0) is True
+        assert calls == [("req-1", 2.0)]
 
     def test_token_iterator_waits_past_timeout_for_delayed_token(self, monkeypatch):
         import threading

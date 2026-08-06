@@ -997,10 +997,18 @@ class _TokenIterator:
     blocked in __next__ waiting for the next token.
     """
 
-    def __init__(self, rqueue, uid, cancel_fn, queue_timeout):
+    def __init__(
+        self,
+        rqueue,
+        uid,
+        cancel_fn,
+        queue_timeout,
+        cancel_wait_fn=None,
+    ):
         self._rqueue = rqueue
         self._uid = uid
         self._cancel_fn = cancel_fn
+        self._cancel_wait_fn = cancel_wait_fn
         self._queue_timeout = queue_timeout
         self._ended = False
         self._closed = False
@@ -1038,13 +1046,16 @@ class _TokenIterator:
             self._ended = True
         return item
 
-    def close(self):
+    def close(self, *, wait=False, timeout=None):
         with self._lock:
             if self._closed:
-                return
+                return True
             self._closed = True
         if not self._ended:
+            if wait and self._cancel_wait_fn is not None:
+                return self._cancel_wait_fn(self._uid, timeout)
             self._cancel_fn(self._uid)
+        return True
 
     def __del__(self):
         # Mirror generator semantics: implicit close on GC.
@@ -1097,6 +1108,7 @@ class ResponseGenerator:
         self._ready = Event()
         self._load_error: Optional[Exception] = None
         self._cancelled: set = set()
+        self._cancel_acks: dict = {}
         self._cancel_lock = Lock()
         self._tokenizer_lock = Lock()
         self._thread = Thread(target=self._run, daemon=True)
@@ -1106,6 +1118,9 @@ class ResponseGenerator:
         self._stop = True
         self.requests.put(None)
         self._thread.join(timeout=5.0)
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
 
     def wait_until_ready(self, timeout: Optional[float] = None):
         if not self._ready.wait(timeout):
@@ -1117,6 +1132,19 @@ class ResponseGenerator:
     def _cancel(self, uid):
         with self._cancel_lock:
             self._cancelled.add(uid)
+            if not hasattr(self, "_cancel_acks"):
+                self._cancel_acks = {}
+            return self._cancel_acks.setdefault(uid, Event())
+
+    def _cancel_and_wait(self, uid, timeout=None):
+        acknowledgement = self._cancel(uid)
+        return acknowledgement.wait(timeout)
+
+    def _acknowledge_cancel(self, uid):
+        with self._cancel_lock:
+            acknowledgement = getattr(self, "_cancel_acks", {}).pop(uid, None)
+        if acknowledgement is not None:
+            acknowledgement.set()
 
     def _drain_cancellations(self) -> set:
         with self._cancel_lock:
@@ -1246,7 +1274,11 @@ class ResponseGenerator:
             raise ctx
 
         return ctx, _TokenIterator(
-            rqueue, ctx.uid, self._cancel, get_token_queue_timeout()
+            rqueue,
+            ctx.uid,
+            self._cancel,
+            get_token_queue_timeout(),
+            self._cancel_and_wait,
         )
 
     def _cpu_preprocess(self, prompt, images=None, audio=None, videos=None) -> dict:
@@ -1822,9 +1854,9 @@ class ResponseGenerator:
 
                 # Drop abandoned requests before doing more work.
                 cancelled = self._drain_cancellations()
-                if cancelled and batch_gen is not None:
+                if cancelled:
                     for uid in cancelled:
-                        if uid in active:
+                        if batch_gen is not None and uid in active:
                             batch_gen.remove(uid)
                             info = active.pop(uid)
                             logger.info(
@@ -1836,6 +1868,7 @@ class ResponseGenerator:
                                 info["rqueue"].put(None)
                             except Exception:
                                 pass
+                        self._acknowledge_cancel(uid)
 
                 if new_items and batch_gen is not None and not active:
                     if not batch_gen.has_work:
@@ -2049,6 +2082,7 @@ class ResponseGenerator:
             cancelled.update(self._drain_cancellations())
             if uid in cancelled:
                 cancelled.discard(uid)
+                self._acknowledge_cancel(uid)
                 return False
             return True
 
@@ -2288,6 +2322,12 @@ class ResponseGenerator:
                     row_ids=sample_row_ids,
                 )
                 for tok_list, _ in rounds_iter:
+                    cancelled = self._drain_cancellations()
+                    for uid in cancelled:
+                        if uid in rqueues and uid not in finished_uids:
+                            rqueues[uid].put(None)
+                            finished_uids.add(uid)
+                        self._acknowledge_cancel(uid)
                     for j, tok in enumerate(tok_list):
                         if tok is None:
                             continue

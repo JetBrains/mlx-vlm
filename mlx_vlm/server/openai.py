@@ -4,6 +4,7 @@ import binascii
 import gc
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -11,6 +12,8 @@ import uuid
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from threading import Event as ThreadEvent
+from threading import Lock as ThreadLock
 from typing import Any, List, Optional, Tuple
 
 import mlx.core as mx
@@ -84,6 +87,18 @@ from .schemas import (
 )
 
 logger = logging.getLogger("mlx_vlm.server")
+
+
+def _get_soft_request_timeout() -> Optional[float]:
+    raw = os.environ.get("MLX_VLM_SOFT_REQUEST_TIMEOUT", "")
+    if not raw:
+        return None
+    try:
+        timeout = float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid MLX_VLM_SOFT_REQUEST_TIMEOUT=%r", raw)
+        return None
+    return timeout if timeout > 0 else None
 
 _INHERIT_ADAPTER = None
 get_cached_model = None
@@ -2098,12 +2113,16 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                 output_tokens = 0
                 metrics = GenerationMetrics()
                 finish_reason = None
+                soft_timed_out = False
 
                 collected_logprobs: List[
                     Tuple[int, float, Optional[List[Tuple[int, float]]]]
                 ] = []
 
                 if runtime.response_generator is not None:
+                    cancel_requested = ThreadEvent()
+                    iterator_lock = ThreadLock()
+                    iterator_holder = {"iterator": None}
 
                     def _blocking_generate():
                         metrics = GenerationMetrics()
@@ -2120,23 +2139,76 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             args=gen_args,
                             **({"videos": videos} if videos else {}),
                         )
+                        with iterator_lock:
+                            iterator_holder["iterator"] = token_iter
                         pt = ctx.prompt_tokens
-                        for token in token_iter:
-                            text += token.text
-                            gt += getattr(token, "token_count", 1)
-                            metrics.record_chunk(token)
-                            if request.logprobs and token.finish_reason != "stop":
-                                logprobs.append(
-                                    (token.token, token.logprobs, token.top_logprobs)
-                                )
-                            if token.finish_reason:
-                                fr = token.finish_reason
-                                break
                         try:
-                            token_iter.close()
-                        except Exception:
-                            pass
+                            if cancel_requested.is_set():
+                                token_iter.close(wait=True)
+                            else:
+                                for token in token_iter:
+                                    text += token.text
+                                    gt += getattr(token, "token_count", 1)
+                                    metrics.record_chunk(token)
+                                    if (
+                                        request.logprobs
+                                        and token.finish_reason != "stop"
+                                    ):
+                                        logprobs.append(
+                                            (
+                                                token.token,
+                                                token.logprobs,
+                                                token.top_logprobs,
+                                            )
+                                        )
+                                    if token.finish_reason:
+                                        fr = token.finish_reason
+                                        break
+                                    if cancel_requested.is_set():
+                                        token_iter.close(wait=True)
+                                        break
+                        finally:
+                            try:
+                                if cancel_requested.is_set():
+                                    token_iter.close(wait=True)
+                                else:
+                                    token_iter.close()
+                            except AttributeError:
+                                pass
+                            except Exception:
+                                logger.exception("Failed to close generation iterator")
                         return pt, text, gt, fr, metrics, logprobs
+
+                    generation_task = asyncio.create_task(
+                        asyncio.to_thread(_blocking_generate)
+                    )
+                    soft_timeout = _get_soft_request_timeout()
+                    try:
+                        if soft_timeout is None:
+                            generation_result = await generation_task
+                        else:
+                            remaining = max(
+                                0.001,
+                                soft_timeout
+                                - (time.perf_counter() - request_start),
+                            )
+                            generation_result = await asyncio.wait_for(
+                                asyncio.shield(generation_task), timeout=remaining
+                            )
+                    except asyncio.TimeoutError:
+                        soft_timed_out = True
+                        cancel_requested.set()
+                        with iterator_lock:
+                            token_iter = iterator_holder["iterator"]
+                        if token_iter is not None:
+                            close_task = asyncio.create_task(
+                                asyncio.to_thread(token_iter.close, wait=True)
+                            )
+                            generation_result, _ = await asyncio.gather(
+                                generation_task, close_task
+                            )
+                        else:
+                            generation_result = await generation_task
 
                     (
                         prompt_tokens,
@@ -2145,7 +2217,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                         finish_reason,
                         metrics,
                         collected_logprobs,
-                    ) = await asyncio.to_thread(_blocking_generate)
+                    ) = generation_result
                 else:
                     gen_result = generate(
                         model=model,
@@ -2165,6 +2237,23 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                     output_tokens = gen_result.generation_tokens
                     metrics.record_result(gen_result)
                     finish_reason = getattr(gen_result, "finish_reason", None) or "stop"
+
+                if soft_timed_out and output_tokens == 0:
+                    runtime.metrics.record_failure(
+                        endpoint="/chat/completions",
+                        model=request.model,
+                        stream=False,
+                        error="generation_soft_timeout_without_output",
+                    )
+                    raise HTTPException(
+                        status_code=504,
+                        detail="Generation stopped at the request time limit before producing output",
+                    )
+                if soft_timed_out:
+                    logger.warning(
+                        "Generation stopped at soft request timeout with %d output tokens",
+                        output_tokens,
+                    )
 
                 mx.clear_cache()
                 gc.collect()
@@ -2305,6 +2394,10 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
 
                 return result
 
+            except HTTPException:
+                mx.clear_cache()
+                gc.collect()
+                raise
             except PromptTooLongError as e:
                 runtime.metrics.record_failure(
                     endpoint="/chat/completions",
