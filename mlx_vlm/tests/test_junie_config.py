@@ -4,6 +4,7 @@ import os
 
 from mlx_vlm.server import _app_module as server_app
 from mlx_vlm.server.junie import config, launch
+from mlx_vlm_shared.server_settings import normalize_config
 
 
 def test_config_file_drives_model_preload(monkeypatch, tmp_path):
@@ -85,3 +86,34 @@ def test_missing_config_is_created_with_stas_defaults(monkeypatch, tmp_path):
 
     assert loaded == config.DEFAULT_CONFIG
     assert json.loads(path.read_text()) == config.DEFAULT_CONFIG
+
+
+def test_invalid_manual_config_is_normalized_with_shared_defaults(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "server-config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "model_name": "test-model",
+                "auto_unload_time": "hello",
+                "kv_quantization": "yes",
+            }
+        )
+    )
+    monkeypatch.setenv(config.CONFIG_PATH_ENV, str(path))
+
+    loaded = config.load_config()
+
+    assert loaded["model_name"] == "test-model"
+    assert loaded["auto_unload_time"] == config.DEFAULT_CONFIG["auto_unload_time"]
+    assert loaded["kv_quantization"] is config.DEFAULT_CONFIG["kv_quantization"]
+    assert json.loads(path.read_text()) == loaded
+    assert [item.name for item in tmp_path.iterdir()] == ["server-config.json"]
+
+
+def test_shared_validation_preserves_previously_allowed_null_model():
+    loaded, invalid = normalize_config({"model_name": None})
+
+    assert loaded["model_name"] is None
+    assert invalid == {}
