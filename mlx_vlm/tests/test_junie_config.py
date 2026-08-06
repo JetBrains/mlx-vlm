@@ -70,6 +70,18 @@ def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
     assert os.environ["MLX_VLM_MAX_CONCURRENT_REQUESTS"] == "1"
 
 
+def test_pre_m5_mac_uses_standard_prefill(monkeypatch):
+    monkeypatch.setattr(launch, "_apple_chip_generation", lambda: 4)
+
+    assert "--int8-prefill" not in launch.build_argv(config.DEFAULT_CONFIG)
+
+
+def test_m5_mac_uses_int8_prefill(monkeypatch):
+    monkeypatch.setattr(launch, "_apple_chip_generation", lambda: 5)
+
+    assert "--int8-prefill" in launch.build_argv(config.DEFAULT_CONFIG)
+
+
 def test_gateway_owns_auto_unload(monkeypatch):
     monkeypatch.setenv("MLX_VLM_AUTO_UNLOAD_TIME", "60")
 

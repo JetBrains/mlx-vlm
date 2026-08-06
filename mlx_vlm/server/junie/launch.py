@@ -13,13 +13,36 @@ Extra command-line arguments are appended after the config-derived ones
     python -m mlx_vlm.server.junie --log-level DEBUG
 """
 
+import logging
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional
 
 from .config import DEFAULT_CONFIG, config_path, load_config
 from .parent_watchdog import start_parent_watchdog
+
+
+logger = logging.getLogger("mlx_vlm.server")
+
+
+def _apple_chip_generation() -> Optional[int]:
+    """Return the Apple M-series generation reported by macOS."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    match = re.search(r"\bApple M(\d+)\b", result.stdout)
+    return int(match.group(1)) if match else None
 
 
 def _default_seed_request() -> Optional[str]:
@@ -69,8 +92,12 @@ def build_argv(cfg: dict) -> List[str]:
         "--prefill-step-size",
         str(cfg.get("prefill_step_size") or DEFAULT_CONFIG["prefill_step_size"]),
     ]
-    if cfg.get("int8_prefill"):
+    if cfg.get("int8_prefill") and (_apple_chip_generation() or 0) >= 5:
         argv.append("--int8-prefill")
+    elif cfg.get("int8_prefill"):
+        logger.warning(
+            "int8 prefill requires Apple M5 or newer; using standard prefill."
+        )
     if cfg.get("preserve_thinking"):
         argv.append("--preserve-thinking")
     if cfg.get("log_raw_tokens"):
