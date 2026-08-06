@@ -21,6 +21,14 @@ cd "$SCRIPT_DIR"
 # repo dir (gitignored; truncated on each start).
 exec > >(tee "$SCRIPT_DIR/mlx_server.log") 2>&1
 
+OS_NAME="$(uname -s)"
+ARCH_NAME="$(uname -m)"
+if [ "$OS_NAME" != "Darwin" ] || [ "$ARCH_NAME" != "arm64" ]; then
+  echo "ERROR: This server requires macOS on Apple Silicon (arm64)." >&2
+  echo "Detected: $OS_NAME $ARCH_NAME. Use a native arm64 terminal on Apple Silicon." >&2
+  exit 1
+fi
+
 HOST=0.0.0.0
 PORT=19239
 WORKER_PORT=8086
