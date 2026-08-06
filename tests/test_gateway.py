@@ -131,12 +131,22 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
             return httpx.Response(200, json={"enabled": True})
         if request.url.path == "/cache/reset":
             return httpx.Response(200, json={"status": "cleared"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [{"id": "demo", "object": "model", "created": 1}],
+                },
+            )
         raise AssertionError(request.url.path)
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
-        assert client.post("/start_worker").status_code == 200
+        _wait_until(lambda: client.get("/ready").status_code == 200)
         assert processes[0].spawn_kwargs["env"][GATEWAY_PID_ENV] == str(os.getpid())
+        assert client.post("/start_worker").status_code == 404
+        assert client.post("/stop_worker").status_code == 404
         response = client.post(
             "/v1/chat/completions",
             json={"model": "any-model", "messages": [], "stream": True},
@@ -157,12 +167,26 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
         assert client.get("/v1/cache/stats").json() == {"enabled": True}
         assert client.post("/cache/reset").json() == {"status": "cleared"}
         assert client.post("/v1/cache/reset").json() == {"status": "cleared"}
+        assert client.get("/v1/models").json()["data"][0]["id"] == "demo"
 
-        assert client.post("/stop_worker").status_code == 200
+        assert client.post("/unload").json() == {
+            "status": "success",
+            "message": "Model unloaded successfully",
+            "unloaded": {
+                "model_name": "demo",
+                "adapter_name": None,
+                "models": {},
+            },
+        }
         assert client.get("/ready").status_code == 503
         process_count = len(processes)
         time.sleep(0.06)
         assert len(processes) == process_count
+        assert client.post("/v1/unload").json() == {
+            "status": "no_model_loaded",
+            "message": "No model is currently loaded",
+        }
+        assert client.get("/v1/models").json()["data"][0]["id"] == "demo"
 
         assert client.post("/v1/chat/completions", json={}).status_code == 200
         assert len(processes) == process_count + 1
@@ -367,10 +391,16 @@ def test_config_save_failure_keeps_worker_running(monkeypatch, tmp_path):
         assert [item.name for item in tmp_path.iterdir()] == ["server-config.json"]
 
 
-def test_applying_current_model_is_a_noop(monkeypatch, tmp_path):
+def test_applying_current_settings_is_a_noop(monkeypatch, tmp_path):
     model = "mlx-community/Qwen3.6-27B-4bit"
     config_path = tmp_path / "server-config.json"
-    config_path.write_text(json.dumps({"model_name": model}))
+    current = {
+        "model_name": model,
+        "max_context_length": 12345,
+        "kv_quantization": False,
+        "auto_unload_time": 600,
+    }
+    config_path.write_text(json.dumps(current))
 
     def handler(request):
         if request.url.path == "/ready":
@@ -381,12 +411,17 @@ def test_applying_current_model_is_a_noop(monkeypatch, tmp_path):
     with TestClient(app) as client:
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
 
-        response = client.post("/apply_settings", json={"model_name": model})
+        original_process = processes[0]
+        response = client.post("/apply_settings", json=current)
 
         assert response.status_code == 200
-        assert response.json()["status"] == "applied"
-        assert response.json()["changes"] == []
+        assert response.json() == {
+            "status": "applied",
+            "changes": [],
+            "settings": current,
+        }
         assert len(processes) == 1
+        assert processes[0] is original_process
 
 
 def test_force_apply_restarts_worker_without_stale_request_restart(
@@ -485,7 +520,7 @@ def test_second_consecutive_500_restarts_worker(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
-        assert client.post("/start_worker").status_code == 200
+        _wait_until(lambda: client.get("/ready").status_code == 200)
         assert client.post("/v1/chat/completions", json={}).status_code == 500
         assert len(processes) == 1
         second = client.post("/v1/chat/completions", json={})
@@ -506,7 +541,7 @@ def test_422_between_500_responses_resets_restart_counter(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
-        assert client.post("/start_worker").status_code == 200
+        _wait_until(lambda: client.get("/ready").status_code == 200)
         assert client.post("/v1/chat/completions", json={}).status_code == 500
         assert client.post("/v1/chat/completions", json={}).status_code == 422
         assert client.post("/v1/chat/completions", json={}).status_code == 500
@@ -526,7 +561,7 @@ def test_worker_connection_failure_returns_503_and_restarts(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
-        assert client.post("/start_worker").status_code == 200
+        _wait_until(lambda: client.get("/ready").status_code == 200)
         response = client.post("/v1/chat/completions", json={})
         assert response.status_code == 503
         assert response.json()["detail"] == "Inference worker restarted; please retry"
@@ -543,14 +578,14 @@ def test_hard_timeout_returns_504_and_restarts_worker(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
-        assert client.post("/start_worker").status_code == 200
+        _wait_until(lambda: client.get("/ready").status_code == 200)
         response = client.post("/v1/chat/completions", json={})
         assert response.status_code == 504
         assert response.json()["detail"] == "Inference worker did not stop in time"
         _wait_until(lambda: len(processes) == 2)
 
 
-def test_manual_stop_interrupts_active_request_without_restart(monkeypatch):
+def test_unload_interrupts_active_request_without_restart(monkeypatch):
     inference_started = threading.Event()
     processes = None
 
@@ -566,7 +601,7 @@ def test_manual_stop_interrupts_active_request_without_restart(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
-        assert client.post("/start_worker").status_code == 200
+        _wait_until(lambda: client.get("/ready").status_code == 200)
         result = {}
 
         def send_request():
@@ -576,7 +611,7 @@ def test_manual_stop_interrupts_active_request_without_restart(monkeypatch):
         request_thread.start()
         assert inference_started.wait(timeout=1.0)
 
-        assert client.post("/stop_worker").status_code == 200
+        assert client.post("/v1/unload").status_code == 200
         request_thread.join(timeout=1.0)
         assert not request_thread.is_alive()
         assert result["response"].status_code == 503

@@ -392,6 +392,7 @@ def create_app(
         app.state.settings_store = SettingsStore(settings.config_path)
         app.state.lifecycle_lock = asyncio.Lock()
         app.state.shutting_down = False
+        app.state.models_payload = None
         await supervisor.open()
         idle_task = asyncio.create_task(
             stop_idle_worker(app),
@@ -576,19 +577,6 @@ def create_app(
         status_code = 200 if state["status"] == "ready" else 503
         return JSONResponse({"status": state["status"], "worker": state}, status_code)
 
-    @app.post("/start_worker")
-    async def start_worker(request: Request):
-        try:
-            state = await supervisor(request).start_worker(wait_ready=True)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return {"status": "ready", "worker": state}
-
-    @app.post("/stop_worker")
-    async def stop_worker(request: Request):
-        state = await supervisor(request).stop_worker()
-        return {"status": "stopped", "worker": state}
-
     async def management_proxy(request: Request, method: str, path: str):
         sup = supervisor(request)
         if sup.state != "ready":
@@ -608,6 +596,57 @@ def create_app(
                 detail="Inference worker restarted; please retry",
             ) from exc
         return response
+
+    @app.get("/models")
+    @app.get("/v1/models", include_in_schema=False)
+    async def models(request: Request):
+        if supervisor(request).state == "ready":
+            response = await management_proxy(request, "GET", "/v1/models")
+            if response.status_code == 200:
+                try:
+                    request.app.state.models_payload = response.json()
+                except ValueError:
+                    pass
+            return _proxy_response(response)
+
+        if request.app.state.models_payload is not None:
+            return request.app.state.models_payload
+
+        store = settings_store(request)
+        model_ids = [store.draft_model(), store.current()["model_name"]]
+        return {
+            "object": "list",
+            "data": [
+                {"id": model_id, "object": "model", "created": 0}
+                for model_id in dict.fromkeys(model_ids)
+                if model_id
+            ],
+        }
+
+    @app.post("/unload")
+    @app.post("/v1/unload", include_in_schema=False)
+    async def unload(request: Request):
+        sup = supervisor(request)
+        process = sup.process
+        if process is None or process.returncode is not None:
+            return {
+                "status": "no_model_loaded",
+                "message": "No model is currently loaded",
+            }
+        worker = dict(sup.worker_health)
+        unloaded = {
+            "model_name": worker.get("loaded_model")
+            or settings_store(request).current()["model_name"],
+            "adapter_name": worker.get("loaded_adapter"),
+            "models": worker.get("loaded_models", {}),
+        }
+        async with request.app.state.lifecycle_lock:
+            await sup.stop_worker()
+        return {
+            "status": "success",
+            "message": "Model unloaded successfully",
+            "unloaded": unloaded,
+        }
 
     @app.get("/metrics")
     @app.get("/v1/metrics", include_in_schema=False)
