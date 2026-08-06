@@ -10,6 +10,15 @@ from mlx_vlm_gateway.settings import (
 )
 
 
+def test_gateway_creates_missing_config_with_defaults(tmp_path):
+    path = tmp_path / "server-config.json"
+
+    store = SettingsStore(str(path))
+
+    assert store.current() == DEFAULT_PUBLIC_SETTINGS
+    assert json.loads(path.read_text()) == settings_module.DEFAULT_CONFIG
+
+
 def test_settings_store_reads_and_preserves_worker_config(tmp_path):
     path = tmp_path / "server-config.json"
     path.write_text(

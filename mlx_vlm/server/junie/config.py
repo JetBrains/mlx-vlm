@@ -31,25 +31,8 @@ def _sanitize(raw: dict) -> dict:
     return config
 
 
-def _write(path: str, config: dict) -> None:
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    temporary = os.path.join(directory, f".{os.path.basename(path)}.tmp")
-    try:
-        with open(temporary, "w", encoding="utf-8") as stream:
-            json.dump(config, stream, indent=2)
-            stream.write("\n")
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
-
-
 def load_config() -> Optional[dict]:
-    """Read and normalize the config, creating it when it is missing."""
+    """Read and normalize the gateway-owned config without changing it."""
     path = config_path()
     if not path:
         return None
@@ -60,42 +43,17 @@ def load_config() -> Optional[dict]:
         if not isinstance(raw, dict):
             raise ValueError("config root must be a JSON object")
     except FileNotFoundError:
-        logger.info("Config: %s not found; creating it with defaults.", path)
-        config = dict(DEFAULT_CONFIG)
-        _write(path, config)
-        return config
+        logger.warning("Config: %s not found; using defaults in memory.", path)
+        return dict(DEFAULT_CONFIG)
     except (OSError, ValueError) as exc:
         logger.warning(
-            "Config: cannot read %s (%s); replacing it with defaults.",
+            "Config: cannot read %s (%s); using defaults in memory.",
             path,
             exc,
         )
-        config = dict(DEFAULT_CONFIG)
-        _write(path, config)
-        return config
+        return dict(DEFAULT_CONFIG)
 
-    config = _sanitize(raw)
-    if config != raw:
-        try:
-            _write(path, config)
-            logger.info("Config: normalized invalid or missing settings in %s", path)
-        except OSError as exc:
-            logger.warning("Config: failed to normalize %s: %s", path, exc)
-    return config
-
-
-def save_settings(updates: dict) -> None:
-    """Merge settings into the config file when called by a standalone worker."""
-    path = config_path()
-    if not path:
-        return
-    config = load_config() or dict(DEFAULT_CONFIG)
-    config = _sanitize({**config, **updates})
-    try:
-        _write(path, config)
-        logger.info("Config: saved %s to %s", sorted(updates), path)
-    except OSError as exc:
-        logger.warning("Config: failed to save settings to %s: %s", path, exc)
+    return _sanitize(raw)
 
 
 def apply_config_to_env(config: dict) -> None:
