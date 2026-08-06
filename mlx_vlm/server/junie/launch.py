@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import DEFAULT_CONFIG, config_path, load_config
+from .parent_watchdog import start_parent_watchdog
 
 
 def _default_seed_request() -> Optional[str]:
@@ -83,6 +84,7 @@ def build_argv(cfg: dict) -> List[str]:
 
 
 def main() -> None:
+    start_parent_watchdog()
     from ..cli import main as cli_main
 
     cfg = load_config()

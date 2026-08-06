@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import signal
 import sys
 import threading
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import mlx_vlm_gateway.app as gateway_module
 from mlx_vlm_gateway.app import GatewaySettings, create_app
+from mlx_vlm_gateway.app import GATEWAY_PID_ENV
 
 
 class FakeProcess:
@@ -45,6 +47,7 @@ def _gateway(
 
     async def fake_create_subprocess(*_args, **_kwargs):
         process = FakeProcess()
+        process.spawn_kwargs = _kwargs
         processes.append(process)
         return process
 
@@ -133,6 +136,7 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
         assert client.post("/start_worker").status_code == 200
+        assert processes[0].spawn_kwargs["env"][GATEWAY_PID_ENV] == str(os.getpid())
         response = client.post(
             "/v1/chat/completions",
             json={"model": "any-model", "messages": [], "stream": True},

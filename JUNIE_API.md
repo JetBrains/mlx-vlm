@@ -3,6 +3,8 @@
 The public server is the lightweight gateway at `http://localhost:8085`.
 The inference worker is private on `127.0.0.1:8086` and may be restarted or
 stopped without taking the gateway down.
+The worker also watches its parent process and exits if the gateway crashes,
+so an orphan cannot keep model memory or port `8086` occupied.
 
 Start both through the single supported entrypoint:
 

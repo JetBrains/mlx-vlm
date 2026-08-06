@@ -17,6 +17,7 @@ from .settings import RESTART_SETTING_KEYS, SettingsStore, SettingsValidationErr
 
 
 logger = logging.getLogger("mlx_vlm.gateway")
+GATEWAY_PID_ENV = "MLX_VLM_GATEWAY_PID"
 
 
 @dataclass(frozen=True)
@@ -157,6 +158,9 @@ class WorkerSupervisor:
         command = self.settings.worker_command
         logger.info("Starting inference worker: %s", " ".join(command))
         kwargs = {}
+        worker_env = os.environ.copy()
+        worker_env[GATEWAY_PID_ENV] = str(os.getpid())
+        kwargs["env"] = worker_env
         if os.name != "nt":
             kwargs["start_new_session"] = True
         self.process = await asyncio.create_subprocess_exec(*command, **kwargs)
