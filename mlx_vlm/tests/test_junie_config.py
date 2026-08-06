@@ -69,6 +69,14 @@ def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
     assert os.environ["MLX_VLM_MAX_CONCURRENT_REQUESTS"] == "1"
 
 
+def test_gateway_owns_auto_unload(monkeypatch):
+    monkeypatch.setenv("MLX_VLM_AUTO_UNLOAD_TIME", "60")
+
+    config.apply_config_to_env(config.DEFAULT_CONFIG)
+
+    assert "MLX_VLM_AUTO_UNLOAD_TIME" not in os.environ
+
+
 def test_missing_config_is_created_with_stas_defaults(monkeypatch, tmp_path):
     path = tmp_path / "server-config.json"
     monkeypatch.setenv(config.CONFIG_PATH_ENV, str(path))

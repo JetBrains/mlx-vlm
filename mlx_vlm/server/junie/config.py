@@ -15,9 +15,6 @@ import os
 import tempfile
 from typing import Optional
 
-AUTO_UNLOAD_TIME_ENV = "MLX_VLM_AUTO_UNLOAD_TIME"
-AUTO_UNLOAD_POLL_S = 10
-
 logger = logging.getLogger("mlx_vlm.server")
 
 CONFIG_PATH_ENV = "JUNIE_SERVER_CONFIG"
@@ -88,8 +85,10 @@ def _is_positive_int_or_none(value) -> bool:
 
 def _is_int_in(low, high):
     def check(value):
-        return isinstance(value, int) and not isinstance(value, bool) and (
-            low <= value <= high
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and (low <= value <= high)
         )
 
     return check
@@ -198,9 +197,7 @@ def load_config() -> Optional[dict]:
         # for hand-editing.
         try:
             _write(path, cfg)
-            logger.info(
-                "Config: added default fields %s to %s", sorted(missing), path
-            )
+            logger.info("Config: added default fields %s to %s", sorted(missing), path)
         except OSError:
             pass
     return cfg
@@ -239,7 +236,9 @@ def apply_config_to_env(cfg: dict) -> None:
     set_or_unset(
         "KV_BITS", DEFAULT_KV_QUANT_BITS if cfg.get("kv_quantization") else None
     )
-    set_or_unset(AUTO_UNLOAD_TIME_ENV, cfg.get("auto_unload_time"))
+    # The gateway owns idle timing and stops the whole worker process. Do not
+    # leave the retired worker-side auto-unload setting in the child process.
+    os.environ.pop("MLX_VLM_AUTO_UNLOAD_TIME", None)
 
 
 def initialize_from_config() -> None:
