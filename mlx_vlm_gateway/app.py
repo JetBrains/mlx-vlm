@@ -649,22 +649,28 @@ def create_app(
         sup.active_requests += 1
         sup.last_activity_at = time.monotonic()
         try:
-            if sup.state != "ready":
-                async with request.app.state.lifecycle_lock:
-                    if sup.state != "ready":
-                        try:
-                            await sup.start_worker(wait_ready=True)
-                        except RuntimeError as exc:
-                            sup.requests_failed += 1
-                            raise HTTPException(
-                                status_code=503,
-                                detail=(
-                                    "Inference worker did not become ready in time; "
-                                    "please retry"
-                                ),
-                            ) from exc
+            async with request.app.state.lifecycle_lock:
+                if request.app.state.shutting_down:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "Model serving is unavailable: server phase is 'stopping'."
+                        ),
+                    )
+                if sup.state != "ready":
+                    try:
+                        await sup.start_worker(wait_ready=True)
+                    except RuntimeError as exc:
+                        sup.requests_failed += 1
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                "Inference worker did not become ready in time; "
+                                "please retry"
+                            ),
+                        ) from exc
+                worker_generation = sup.generation
 
-            worker_generation = sup.generation
             response = await request.app.state.client.post(
                 f"{settings.worker_url}/v1/chat/completions",
                 json=payload,
