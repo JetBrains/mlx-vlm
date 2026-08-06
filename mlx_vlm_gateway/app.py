@@ -30,6 +30,7 @@ class GatewaySettings:
     probe_interval_s: float = 5.0
     probe_timeout_s: float = 2.0
     probe_failures_before_restart: int = 3
+    max_start_failures: int = 3
     restart_delay_s: float = 2.0
     shutdown_timeout_s: float = 5.0
     idle_check_interval_s: float = 1.0
@@ -49,6 +50,7 @@ class WorkerSupervisor:
         self._state = "stopped"
         self.state_since_unix = time.time()
         self.restart_count = 0
+        self.start_failures = 0
         self.last_restart_reason: Optional[str] = None
         self.last_error: Optional[str] = None
         self.worker_health: dict = {}
@@ -124,6 +126,8 @@ class WorkerSupervisor:
             self.state = "stopped"
 
     async def start_worker(self, *, wait_ready: bool = True) -> dict:
+        if not self.desired_running or self.state in {"stopped", "error"}:
+            self.start_failures = 0
         self.desired_running = True
         await self._ensure_process()
         if wait_ready and self.state != "ready":
@@ -133,6 +137,8 @@ class WorkerSupervisor:
                 )
             except asyncio.TimeoutError as exc:
                 raise RuntimeError("Worker did not become ready in time") from exc
+            if self.state != "ready":
+                raise RuntimeError(self.last_error or "Worker failed to start")
         return self.snapshot()
 
     async def stop_worker(self) -> dict:
@@ -232,6 +238,8 @@ class WorkerSupervisor:
                 )
                 if not self.desired_running or self._closed:
                     continue
+                if self.state == "error":
+                    continue
                 process = self.process
                 if process is None or process.returncode is not None:
                     reason = (
@@ -239,12 +247,16 @@ class WorkerSupervisor:
                         if process is None
                         else f"worker exited with code {process.returncode}"
                     )
-                    self.schedule_restart(reason)
+                    self.schedule_restart(
+                        reason,
+                        startup_failure=self.state in {"starting", "restarting"},
+                    )
                     continue
 
                 ready = await self._probe()
                 if ready:
                     failed_probes = 0
+                    self.start_failures = 0
                     if self.state != "ready":
                         self.last_activity_at = time.monotonic()
                     self.state = "ready"
@@ -255,7 +267,9 @@ class WorkerSupervisor:
                 if self.state == "starting":
                     elapsed = time.monotonic() - (self._spawned_at or time.monotonic())
                     if elapsed >= self.settings.startup_timeout_s:
-                        self.schedule_restart("worker startup timeout")
+                        self.schedule_restart(
+                            "worker startup timeout", startup_failure=True
+                        )
                     continue
                 if failed_probes >= self.settings.probe_failures_before_restart:
                     failed_probes = 0
@@ -266,7 +280,11 @@ class WorkerSupervisor:
                 logger.exception("Worker monitor failed")
 
     def schedule_restart(
-        self, reason: str, *, generation: Optional[int] = None
+        self,
+        reason: str,
+        *,
+        generation: Optional[int] = None,
+        startup_failure: bool = False,
     ) -> None:
         if generation is not None and generation != self.generation:
             return
@@ -275,7 +293,8 @@ class WorkerSupervisor:
         if self._restart_task is not None and not self._restart_task.done():
             return
         self._restart_task = asyncio.create_task(
-            self._restart(reason), name="mlx-vlm-worker-restart"
+            self._restart(reason, startup_failure=startup_failure),
+            name="mlx-vlm-worker-restart",
         )
 
     async def _wait_for_restart(self) -> None:
@@ -290,10 +309,23 @@ class WorkerSupervisor:
             if self._restart_task is task:
                 self._restart_task = None
 
-    async def _restart(self, reason: str) -> None:
+    async def _restart(self, reason: str, *, startup_failure: bool = False) -> None:
         self.last_restart_reason = reason
         self.last_error = reason
         self.restart_count += 1
+        if startup_failure:
+            self.start_failures += 1
+        if self.start_failures >= self.settings.max_start_failures:
+            logger.error(
+                "Inference worker failed to start %d times; stopping restart loop: %s",
+                self.start_failures,
+                reason,
+            )
+            async with self._operation_lock:
+                await self._terminate_locked()
+                self.state = "error" if self.desired_running else "stopped"
+                self._ready_event.set()
+            return
         self.state = "restarting"
         self._ready_event.clear()
         logger.warning("Restarting inference worker: %s", reason)
@@ -427,11 +459,14 @@ def create_app(
                 "starting": "loading_model",
                 "restarting": "restarting",
                 "stopping": "stopping",
+                "error": "error",
             }.get(sup.state, "ready")
         model_id = sup.worker_health.get("loaded_model") or current["model_name"]
         return {
             "phase": phase,
-            "phase_detail": sup.last_error if phase == "restarting" else None,
+            "phase_detail": (
+                sup.last_error if phase in {"restarting", "error"} else None
+            ),
             "phase_since_unix": sup.state_since_unix,
             "uptime_s": round(max(0.0, time.monotonic() - sup._started_at), 3),
             "model": {

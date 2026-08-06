@@ -529,6 +529,36 @@ def test_second_consecutive_500_restarts_worker(monkeypatch):
         _wait_until(lambda: len(processes) == 2)
 
 
+def test_repeated_start_failures_stop_restart_loop(monkeypatch):
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(503, json={"status": "loading"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(
+        monkeypatch,
+        handler,
+        startup_timeout_s=0.03,
+        max_start_failures=3,
+    )
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "error")
+        status = client.get("/status").json()
+        assert status["phase_detail"] == "worker startup timeout"
+        assert len(processes) == 3
+
+        process_count = len(processes)
+        time.sleep(0.08)
+        assert len(processes) == process_count
+
+        response = client.post(
+            "/apply_settings", json={"max_context_length": 12345}
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "applying"
+        _wait_until(lambda: len(processes) == process_count + 1)
+
+
 def test_422_between_500_responses_resets_restart_counter(monkeypatch):
     statuses = iter((500, 422, 500))
 

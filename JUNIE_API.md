@@ -48,7 +48,9 @@ and then forwards the same request.
 }
 ```
 
-Phases are `loading_model`, `ready`, `restarting`, and `stopping`. An
+Phases are `loading_model`, `ready`, `restarting`, `stopping`, and `error`.
+After three consecutive startup failures, the gateway enters `error` instead
+of restarting forever; settings can still be changed to retry startup. An
 auto-unloaded worker is represented as `phase: "ready"` with
 `model.loaded: false`, because the gateway is ready to start it on demand.
 
