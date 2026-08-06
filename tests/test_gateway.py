@@ -34,7 +34,7 @@ class FakeProcess:
         return self.returncode
 
 
-def _gateway(monkeypatch, handler):
+def _gateway(monkeypatch, handler, **settings_overrides):
     processes = []
 
     async def fake_create_subprocess(*_args, **_kwargs):
@@ -61,7 +61,7 @@ def _gateway(monkeypatch, handler):
     def client_factory(timeout):
         return httpx.AsyncClient(transport=transport, timeout=timeout)
 
-    settings = GatewaySettings(
+    setting_values = dict(
         worker_command=(sys.executable, "-c", "pass"),
         startup_timeout_s=1.0,
         request_timeout_s=0.5,
@@ -71,6 +71,8 @@ def _gateway(monkeypatch, handler):
         restart_delay_s=0.01,
         shutdown_timeout_s=0.1,
     )
+    setting_values.update(settings_overrides)
+    settings = GatewaySettings(**setting_values)
     return create_app(settings, client_factory=client_factory), processes
 
 
@@ -137,6 +139,57 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
 
         assert client.post("/start_worker").status_code == 200
         assert len(processes) == process_count + 1
+
+
+def test_junie_status_and_settings_endpoints(monkeypatch, tmp_path):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model_name": "demo-model",
+                "draft_model": "demo-draft",
+                "max_context_length": 12345,
+                "kv_quantization": True,
+                "auto_unload_time": 600,
+            }
+        )
+    )
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(
+                200,
+                json={"status": "ready", "loaded_model": "demo-model"},
+            )
+        raise AssertionError(request.url.path)
+
+    app, _ = _gateway(monkeypatch, handler, config_path=str(config_path))
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+        expected_settings = {
+            "model_name": "demo-model",
+            "max_context_length": 12345,
+            "kv_quantization": True,
+            "auto_unload_time": 600,
+        }
+        assert client.get("/current_settings").json() == expected_settings
+        assert client.get("/v1/current_settings").json() == expected_settings
+
+        status = client.get("/status").json()
+        assert client.get("/v1/status").json() == status
+        assert status["phase"] == "ready"
+        assert status["model"] == {
+            "loaded": True,
+            "id": "demo-model",
+            "draft_model": "demo-draft",
+            "context_limit": 12345,
+        }
+        assert status["inference"] == {
+            "in_progress": False,
+            "in_flight": 0,
+            "queue_depth": 0,
+            "requests": [],
+        }
 
 
 def test_second_consecutive_500_restarts_worker(monkeypatch):

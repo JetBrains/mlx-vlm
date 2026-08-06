@@ -13,6 +13,8 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
+from .settings import SettingsStore
+
 
 logger = logging.getLogger("mlx_vlm.gateway")
 
@@ -29,6 +31,7 @@ class GatewaySettings:
     probe_failures_before_restart: int = 3
     restart_delay_s: float = 2.0
     shutdown_timeout_s: float = 5.0
+    config_path: Optional[str] = None
 
 
 class WorkerSupervisor:
@@ -41,7 +44,8 @@ class WorkerSupervisor:
         self.client = client
         self.process: Optional[asyncio.subprocess.Process] = None
         self.desired_running = True
-        self.state = "stopped"
+        self._state = "stopped"
+        self.state_since_unix = time.time()
         self.restart_count = 0
         self.last_restart_reason: Optional[str] = None
         self.last_error: Optional[str] = None
@@ -58,6 +62,16 @@ class WorkerSupervisor:
         self._monitor_task: Optional[asyncio.Task] = None
         self._restart_task: Optional[asyncio.Task] = None
         self._closed = False
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @state.setter
+    def state(self, value: str) -> None:
+        if value != self._state:
+            self._state = value
+            self.state_since_unix = time.time()
 
     def snapshot(self) -> dict:
         return {
@@ -325,6 +339,7 @@ def create_app(
         supervisor = WorkerSupervisor(settings, client)
         app.state.client = client
         app.state.supervisor = supervisor
+        app.state.settings_store = SettingsStore(settings.config_path)
         await supervisor.open()
         try:
             yield
@@ -336,6 +351,47 @@ def create_app(
 
     def supervisor(request: Request) -> WorkerSupervisor:
         return request.app.state.supervisor
+
+    def settings_store(request: Request) -> SettingsStore:
+        return request.app.state.settings_store
+
+    def status_payload(request: Request) -> dict:
+        sup = supervisor(request)
+        current = settings_store(request).current()
+        phase = {
+            "starting": "loading_model",
+            "restarting": "restarting",
+            "stopping": "stopping",
+        }.get(sup.state, "ready")
+        model_id = sup.worker_health.get("loaded_model") or current["model_name"]
+        return {
+            "phase": phase,
+            "phase_detail": sup.last_error if phase == "restarting" else None,
+            "phase_since_unix": sup.state_since_unix,
+            "uptime_s": round(max(0.0, time.monotonic() - sup._started_at), 3),
+            "model": {
+                "loaded": sup.state == "ready" and bool(sup.process),
+                "id": model_id,
+                "draft_model": settings_store(request).draft_model(),
+                "context_limit": current["max_context_length"],
+            },
+            "inference": {
+                "in_progress": sup.active_requests > 0,
+                "in_flight": sup.active_requests,
+                "queue_depth": max(0, sup.active_requests - 1),
+                "requests": [],
+            },
+        }
+
+    @app.get("/status")
+    @app.get("/v1/status", include_in_schema=False)
+    async def status(request: Request):
+        return status_payload(request)
+
+    @app.get("/current_settings")
+    @app.get("/v1/current_settings", include_in_schema=False)
+    async def current_settings(request: Request):
+        return settings_store(request).current()
 
     @app.get("/health")
     async def health(request: Request):
@@ -466,6 +522,11 @@ def _parse_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--worker-url", default="http://127.0.0.1:8086")
     parser.add_argument("--startup-timeout", type=float, default=120.0)
     parser.add_argument("--request-timeout", type=float, default=275.0)
+    parser.add_argument(
+        "--config",
+        default=os.environ.get("JUNIE_SERVER_CONFIG"),
+        help="Path to the persistent Junie server config JSON",
+    )
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("worker_command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -487,6 +548,7 @@ def main(argv: Optional[Sequence[str]] = None):
         worker_command=tuple(args.worker_command),
         startup_timeout_s=args.startup_timeout,
         request_timeout_s=args.request_timeout,
+        config_path=args.config,
     )
     uvicorn.run(
         create_app(settings),
