@@ -100,6 +100,7 @@ download_and_verify() {
     echo "  ERROR: SHA256 mismatch for $archive"
     echo "    Expected: $expected_sha256"
     echo "    Actual:   $actual"
+    rm -f "$DOWNLOAD_DIR/$archive"
     exit 1
   fi
   echo "  SHA256 verified: $actual"
