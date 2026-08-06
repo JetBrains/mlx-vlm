@@ -15,7 +15,8 @@ import os
 import tempfile
 from typing import Optional
 
-from .watchdog import AUTO_UNLOAD_TIME_ENV
+AUTO_UNLOAD_TIME_ENV = "MLX_VLM_AUTO_UNLOAD_TIME"
+AUTO_UNLOAD_POLL_S = 10
 
 logger = logging.getLogger("mlx_vlm.server")
 
