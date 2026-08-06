@@ -557,6 +557,49 @@ def test_repeated_start_failures_stop_restart_loop(monkeypatch):
         _wait_until(lambda: len(processes) == process_count + 1)
 
 
+def test_process_spawn_failures_leave_gateway_available(monkeypatch):
+    def handler(request):
+        raise AssertionError(request.url.path)
+
+    app, _ = _gateway(
+        monkeypatch,
+        handler,
+        max_start_failures=3,
+    )
+    spawn_attempts = 0
+
+    async def fail_to_spawn(*_args, **_kwargs):
+        nonlocal spawn_attempts
+        spawn_attempts += 1
+        raise FileNotFoundError("worker executable missing")
+
+    monkeypatch.setattr(
+        gateway_module.asyncio,
+        "create_subprocess_exec",
+        fail_to_spawn,
+    )
+
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "error")
+
+        status = client.get("/status").json()
+        assert status["phase_detail"] == (
+            "Failed to start inference worker: worker executable missing"
+        )
+        assert spawn_attempts == 3
+
+        for _ in range(2):
+            response = client.post("/v1/chat/completions", json={})
+            assert response.status_code == 503
+            assert response.json()["detail"] == (
+                "Inference worker is in error state; change restart settings "
+                "or restart the gateway."
+            )
+
+        time.sleep(0.08)
+        assert spawn_attempts == 3
+
+
 def test_422_between_500_responses_resets_restart_counter(monkeypatch):
     statuses = iter((500, 422, 500))
 

@@ -126,7 +126,9 @@ class WorkerSupervisor:
             self.state = "stopped"
 
     async def start_worker(self, *, wait_ready: bool = True) -> dict:
-        if not self.desired_running or self.state in {"stopped", "error"}:
+        if self.state == "error":
+            raise RuntimeError(self.last_error or "Worker is in error state")
+        if not self.desired_running or self.state == "stopped":
             self.start_failures = 0
         self.desired_running = True
         await self._ensure_process()
@@ -169,13 +171,19 @@ class WorkerSupervisor:
         kwargs["env"] = worker_env
         if os.name != "nt":
             kwargs["start_new_session"] = True
-        self.process = await asyncio.create_subprocess_exec(*command, **kwargs)
-        self.generation += 1
         self._spawned_at = time.monotonic()
         self._ready_event.clear()
         self.worker_health = {}
         self.state = "starting"
         self.last_error = None
+        try:
+            self.process = await asyncio.create_subprocess_exec(*command, **kwargs)
+        except OSError as exc:
+            self.process = None
+            self.last_error = f"Failed to start inference worker: {exc}"
+            logger.error(self.last_error)
+            return
+        self.generation += 1
 
     async def _terminate_locked(self) -> None:
         process = self.process
@@ -243,7 +251,7 @@ class WorkerSupervisor:
                 process = self.process
                 if process is None or process.returncode is not None:
                     reason = (
-                        "worker process missing"
+                        self.last_error or "worker process missing"
                         if process is None
                         else f"worker exited with code {process.returncode}"
                     )
@@ -724,6 +732,14 @@ def create_app(
             raise HTTPException(
                 status_code=503,
                 detail="Model serving is unavailable: server phase is 'stopping'.",
+            )
+        if sup.state == "error":
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Inference worker is in error state; change restart settings "
+                    "or restart the gateway."
+                ),
             )
         try:
             payload = await request.json()
