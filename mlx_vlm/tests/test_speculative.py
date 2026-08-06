@@ -28,6 +28,7 @@ from mlx_vlm.models.cache import (
     CacheList,
     KVCache,
     PoolingCache,
+    QuantizedKVCache,
     RotatingKVCache,
 )
 from mlx_vlm.quantization.one_bit import OneBitLinear
@@ -1093,6 +1094,34 @@ def test_qwen3_5_single_row_shortcut_skips_quantized_batch_caches():
     assert not qwen_language._is_single_row_batch_cache(
         BatchTurboQuantKVCache([0], bits=3.5)
     )
+
+
+def test_extract_row_cache_gives_empty_quantized_batch_a_quantized_row():
+    empty_quantized = BatchQuantizedKVCache([0], group_size=32, bits=8)
+
+    row_cache = qwen_language._extract_row_cache(empty_quantized, 0)
+
+    assert isinstance(row_cache, QuantizedKVCache)
+    assert row_cache.group_size == 32
+    assert row_cache.bits == 8
+
+
+def test_extract_row_cache_gives_empty_dense_batch_a_dense_row():
+    empty_dense = BatchKVCache([0])
+
+    row_cache = qwen_language._extract_row_cache(empty_dense, 0)
+
+    assert isinstance(row_cache, KVCache)
+
+
+def test_batch_quantized_kv_cache_merge_rejects_dense_rows():
+    dense_row = KVCache()
+    dense_row.update_and_fetch(
+        mx.zeros((1, 1, 3, 4)), mx.zeros((1, 1, 3, 4))
+    )
+
+    with pytest.raises(TypeError, match="dense keys"):
+        BatchQuantizedKVCache.merge([dense_row])
 
 
 def test_speculative_walk_accepts_until_first_mismatch():
