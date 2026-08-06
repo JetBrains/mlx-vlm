@@ -139,9 +139,7 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
         )
         assert response.status_code == 200
         assert response.json()["timings"]["generation_tps"] == 42.0
-        assert captured == [
-            {"model": "any-model", "messages": [], "stream": False}
-        ]
+        assert captured == [{"model": "any-model", "messages": [], "stream": False}]
 
         metrics = client.get("/metrics").json()
         assert metrics["requests"]["completed"] == 1
@@ -201,7 +199,10 @@ def test_junie_status_and_settings_endpoints(monkeypatch, tmp_path):
         assert client.get("/v1/current_settings").json() == expected_settings
 
         status = client.get("/status").json()
-        assert client.get("/v1/status").json() == status
+        alias_status = client.get("/v1/status").json()
+        assert alias_status["uptime_s"] >= status["uptime_s"]
+        alias_status["uptime_s"] = status["uptime_s"]
+        assert alias_status == status
         assert status["phase"] == "ready"
         assert status["model"] == {
             "loaded": True,
@@ -229,7 +230,9 @@ def test_apply_auto_unload_time_without_restarting_worker(monkeypatch, tmp_path)
     app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+        app.state.supervisor.active_requests = 1
         response = client.post("/apply_settings", json={"auto_unload_time": 600})
+        app.state.supervisor.active_requests = 0
 
         assert response.status_code == 200
         assert response.json() == {
@@ -248,9 +251,7 @@ def test_apply_auto_unload_time_without_restarting_worker(monkeypatch, tmp_path)
 
 def test_auto_unload_stops_idle_worker(monkeypatch, tmp_path):
     config_path = tmp_path / "server-config.json"
-    config_path.write_text(
-        json.dumps({"model_name": "demo", "auto_unload_time": 1})
-    )
+    config_path.write_text(json.dumps({"model_name": "demo", "auto_unload_time": 1}))
 
     captured = []
 
@@ -311,7 +312,7 @@ def test_apply_restart_setting_rejects_busy_request_without_force(
         assert response.status_code == 409
         assert response.json() == {
             "detail": (
-                "1 inference request(s) in flight; pass \"force\": true "
+                '1 inference request(s) in flight; pass "force": true '
                 "to restart model serving anyway."
             )
         }
@@ -365,8 +366,7 @@ def test_force_apply_restarts_worker_without_stale_request_restart(
             "model": "demo",
             "changes": ["kv_quantization"],
             "message": (
-                "Model serving is restarting; poll GET /status until "
-                "phase is 'ready'."
+                "Model serving is restarting; poll GET /status until phase is 'ready'."
             ),
         }
         assert not request_thread.is_alive()

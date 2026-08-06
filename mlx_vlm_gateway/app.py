@@ -186,7 +186,9 @@ class WorkerSupervisor:
                 process.wait(), timeout=self.settings.shutdown_timeout_s
             )
         except asyncio.TimeoutError:
-            logger.warning("Worker did not stop gracefully; killing pid=%s", process.pid)
+            logger.warning(
+                "Worker did not stop gracefully; killing pid=%s", process.pid
+            )
             try:
                 if os.name != "nt":
                     os.killpg(process.pid, signal.SIGKILL)
@@ -259,7 +261,9 @@ class WorkerSupervisor:
             except Exception:
                 logger.exception("Worker monitor failed")
 
-    def schedule_restart(self, reason: str, *, generation: Optional[int] = None) -> None:
+    def schedule_restart(
+        self, reason: str, *, generation: Optional[int] = None
+    ) -> None:
         if generation is not None and generation != self.generation:
             return
         if not self.desired_running or self._closed:
@@ -474,13 +478,6 @@ def create_app(
 
         async with lock:
             sup = supervisor(request)
-            if sup.state in {"starting", "restarting", "stopping"}:
-                phase = status_payload(request)["phase"]
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Server is busy (phase '{phase}'); retry once it settles.",
-                )
-
             restart_changes = set(updates) & RESTART_SETTING_KEYS
             if not restart_changes:
                 return {
@@ -488,6 +485,13 @@ def create_app(
                     "changes": sorted(updates),
                     "settings": store.save(updates),
                 }
+
+            if sup.state in {"starting", "restarting", "stopping"}:
+                phase = status_payload(request)["phase"]
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Server is busy (phase '{phase}'); retry once it settles.",
+                )
 
             if sup.active_requests > 0 and not force:
                 raise HTTPException(
@@ -592,16 +596,12 @@ def create_app(
     @app.get("/cache/stats")
     @app.get("/v1/cache/stats", include_in_schema=False)
     async def cache_stats(request: Request):
-        return _proxy_response(
-            await management_proxy(request, "GET", "/cache/stats")
-        )
+        return _proxy_response(await management_proxy(request, "GET", "/cache/stats"))
 
     @app.post("/cache/reset")
     @app.post("/v1/cache/reset", include_in_schema=False)
     async def cache_reset(request: Request):
-        return _proxy_response(
-            await management_proxy(request, "POST", "/cache/reset")
-        )
+        return _proxy_response(await management_proxy(request, "POST", "/cache/reset"))
 
     @app.post("/shutdown")
     @app.post("/v1/shutdown", include_in_schema=False)
@@ -614,7 +614,10 @@ def create_app(
 
         callback = shutdown_callback
         if callback is None:
-            callback = lambda: os.kill(os.getpid(), signal.SIGTERM)
+
+            def callback():
+                os.kill(os.getpid(), signal.SIGTERM)
+
         asyncio.get_running_loop().call_later(0.05, callback)
         return {"status": "shutting_down"}
 
@@ -629,9 +632,13 @@ def create_app(
         try:
             payload = await request.json()
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Request body must be JSON") from exc
+            raise HTTPException(
+                status_code=400, detail="Request body must be JSON"
+            ) from exc
         if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+            raise HTTPException(
+                status_code=400, detail="Request body must be a JSON object"
+            )
         payload["stream"] = False
         headers = {"content-type": "application/json"}
         for name in ("x-apc-tenant", "x-tenant-id"):
@@ -706,7 +713,9 @@ def create_app(
 
 
 def _parse_args(argv: Optional[Sequence[str]] = None):
-    parser = argparse.ArgumentParser(description="MLX-VLM gateway and worker supervisor")
+    parser = argparse.ArgumentParser(
+        description="MLX-VLM gateway and worker supervisor"
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8085)
     parser.add_argument("--worker-url", default="http://127.0.0.1:8086")

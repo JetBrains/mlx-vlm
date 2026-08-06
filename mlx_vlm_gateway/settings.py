@@ -81,9 +81,7 @@ class SettingsStore:
                 continue
             value = updates[key]
             if value is not None and not (
-                isinstance(value, int)
-                and not isinstance(value, bool)
-                and value > 0
+                isinstance(value, int) and not isinstance(value, bool) and value > 0
             ):
                 raise SettingsValidationError(
                     f'"{key}" must be a positive integer or null.'
