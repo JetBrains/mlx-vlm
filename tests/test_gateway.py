@@ -261,9 +261,11 @@ def test_apply_auto_unload_time_without_restarting_worker(monkeypatch, tmp_path)
         assert json.loads(config_path.read_text())["internal"] == 7
 
 
-def test_auto_unload_stops_idle_worker(monkeypatch, tmp_path):
+def test_invalid_auto_unload_uses_default_and_task_keeps_running(monkeypatch, tmp_path):
     config_path = tmp_path / "server-config.json"
-    config_path.write_text(json.dumps({"model_name": "demo", "auto_unload_time": 1}))
+    config_path.write_text(
+        json.dumps({"model_name": "demo", "auto_unload_time": "hello"})
+    )
 
     captured = []
 
@@ -284,7 +286,8 @@ def test_auto_unload_stops_idle_worker(monkeypatch, tmp_path):
     app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
-        app.state.supervisor.last_activity_at -= 2
+        assert json.loads(config_path.read_text())["auto_unload_time"] == 600
+        app.state.supervisor.last_activity_at -= 601
         _wait_until(lambda: processes[0].returncode is not None)
 
         status = client.get("/status").json()
@@ -329,7 +332,7 @@ def test_apply_restart_setting_rejects_busy_request_without_force(
             )
         }
         assert len(processes) == 1
-        assert "max_context_length" not in json.loads(config_path.read_text())
+        assert json.loads(config_path.read_text())["max_context_length"] is None
 
 
 def test_config_save_failure_keeps_worker_running(monkeypatch, tmp_path):

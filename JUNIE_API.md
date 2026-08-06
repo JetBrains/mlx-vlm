@@ -118,6 +118,12 @@ There is only one persistent config file. Restart settings are validated and
 saved before the running worker is stopped; if saving fails, that worker keeps
 running with the previous settings.
 
+The gateway reads and validates this file once at startup, then keeps only a
+small in-memory copy. Inference and idle checks do not read the file. Applying
+settings atomically updates the same file and the in-memory copy; a restarted
+worker reads that file once. Manual file edits therefore require a gateway
+restart.
+
 ## Shutdown and monitoring
 
 - `POST /shutdown`: stop the worker, release model memory, then terminate the

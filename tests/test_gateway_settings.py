@@ -43,6 +43,7 @@ def test_settings_store_keeps_old_config_when_atomic_replace_fails(
     original = {"model_name": "old-model", "kv_quantization": False}
     path.write_text(json.dumps(original))
     store = SettingsStore(str(path))
+    persisted_before_save = json.loads(path.read_text())
 
     def fail_replace(_source, _target):
         raise OSError("disk full")
@@ -52,8 +53,19 @@ def test_settings_store_keeps_old_config_when_atomic_replace_fails(
     with pytest.raises(OSError, match="disk full"):
         store.save({"kv_quantization": True})
 
-    assert json.loads(path.read_text()) == original
+    assert json.loads(path.read_text()) == persisted_before_save
     assert [item.name for item in tmp_path.iterdir()] == ["server-config.json"]
+
+
+def test_settings_are_validated_once_and_then_read_from_memory(tmp_path):
+    path = tmp_path / "server-config.json"
+    path.write_text(json.dumps({"model_name": "demo", "auto_unload_time": "hello"}))
+
+    store = SettingsStore(str(path))
+    path.write_text(json.dumps({"auto_unload_time": 123}))
+
+    assert store.current()["auto_unload_time"] == 600
+    assert store.current()["model_name"] == "demo"
 
 
 @pytest.mark.parametrize(

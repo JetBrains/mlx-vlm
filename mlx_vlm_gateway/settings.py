@@ -1,27 +1,28 @@
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
-
-PUBLIC_SETTING_KEYS = (
-    "model_name",
-    "max_context_length",
-    "kv_quantization",
-    "auto_unload_time",
+from mlx_vlm_shared.server_settings import (
+    DEFAULT_CONFIG,
+    DEFAULT_DRAFT_MODEL,
+    DEFAULT_PUBLIC_SETTINGS,
+    PUBLIC_SETTING_KEYS,
+    RESTART_SETTING_KEYS,
+    is_valid_setting,
+    normalize_config,
 )
-RESTART_SETTING_KEYS = {
-    "model_name",
-    "max_context_length",
-    "kv_quantization",
-}
-DEFAULT_PUBLIC_SETTINGS = {
-    "model_name": "mlx-community/Qwen3.6-27B-4bit",
-    "max_context_length": None,
-    "kv_quantization": True,
-    "auto_unload_time": 600,
-}
-DEFAULT_DRAFT_MODEL = "mlx-community/Qwen3.6-27B-MTP-4bit"
+
+
+logger = logging.getLogger("mlx_vlm.gateway")
+
+__all__ = [
+    "DEFAULT_PUBLIC_SETTINGS",
+    "RESTART_SETTING_KEYS",
+    "SettingsStore",
+    "SettingsValidationError",
+]
 
 
 class SettingsValidationError(ValueError):
@@ -29,29 +30,71 @@ class SettingsValidationError(ValueError):
 
 
 class SettingsStore:
-    """Lightweight access to the worker's persistent JSON configuration."""
+    """Validated in-memory view of the single persistent JSON config."""
 
     def __init__(self, path: Optional[str]):
         self.path = Path(path).expanduser() if path else None
+        self._config = self._load_once()
 
-    def _load_raw(self) -> dict:
-        if self.path is None or not self.path.is_file():
-            return {}
+    def _load_once(self) -> dict:
+        if self.path is None:
+            return dict(DEFAULT_CONFIG)
+
         try:
-            value = json.loads(self.path.read_text())
-        except (OSError, ValueError):
-            return {}
-        return value if isinstance(value, dict) else {}
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("config root must be a JSON object")
+        except FileNotFoundError:
+            config = dict(DEFAULT_CONFIG)
+            self._write(config)
+            return config
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Cannot read config %s (%s); replacing it with defaults.",
+                self.path,
+                exc,
+            )
+            config = dict(DEFAULT_CONFIG)
+            self._write(config)
+            return config
+
+        config, invalid = normalize_config(raw)
+        for key, value in invalid.items():
+            logger.warning(
+                "Invalid config value %s=%r; using default %r.",
+                key,
+                value,
+                config[key],
+            )
+        if config != raw:
+            try:
+                self._write(config)
+            except OSError as exc:
+                logger.warning("Failed to normalize config %s: %s", self.path, exc)
+        return config
+
+    def _write(self, config: dict) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(f".{self.path.name}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as stream:
+                json.dump(config, stream, indent=2)
+                stream.write("\n")
+            os.replace(temporary, self.path)
+        except BaseException:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise
 
     def current(self) -> dict:
-        raw = self._load_raw()
-        return {
-            key: raw.get(key, default)
-            for key, default in DEFAULT_PUBLIC_SETTINGS.items()
-        }
+        return {key: self._config[key] for key in PUBLIC_SETTING_KEYS}
 
     def draft_model(self) -> Optional[str]:
-        return self._load_raw().get("draft_model", DEFAULT_DRAFT_MODEL)
+        return self._config.get("draft_model", DEFAULT_DRAFT_MODEL)
 
     def validate(self, body) -> tuple[dict, bool]:
         if not isinstance(body, dict):
@@ -81,37 +124,21 @@ class SettingsStore:
                 )
 
         for key in ("max_context_length", "auto_unload_time"):
-            if key not in updates:
-                continue
-            value = updates[key]
-            if value is not None and not (
-                isinstance(value, int) and not isinstance(value, bool) and value > 0
-            ):
+            if key in updates and not is_valid_setting(key, updates[key]):
                 raise SettingsValidationError(
                     f'"{key}" must be a positive integer or null.'
                 )
 
-        if "kv_quantization" in updates and not isinstance(
-            updates["kv_quantization"], bool
+        if "kv_quantization" in updates and not is_valid_setting(
+            "kv_quantization", updates["kv_quantization"]
         ):
             raise SettingsValidationError('"kv_quantization" must be a boolean.')
         return updates, force
 
     def save(self, updates: dict) -> dict:
-        current_file = self._load_raw()
-        current_file.update(updates)
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_name(f".{self.path.name}.tmp")
-            try:
-                with temporary.open("w", encoding="utf-8") as stream:
-                    json.dump(current_file, stream, indent=2)
-                    stream.write("\n")
-                os.replace(temporary, self.path)
-            except BaseException:
-                try:
-                    temporary.unlink()
-                except OSError:
-                    pass
-                raise
+        config, invalid = normalize_config({**self._config, **updates})
+        if invalid:
+            raise SettingsValidationError(f"Invalid settings: {sorted(invalid)}")
+        self._write(config)
+        self._config = config
         return self.current()
