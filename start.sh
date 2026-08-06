@@ -6,8 +6,8 @@ set -euo pipefail
 # On every run this script makes sure the pieces are in place, then starts
 # the OpenAI-compatible server from this repo's sources:
 #   1) model weights   -> downloaded/verified into ~/.local/share/junie-local
-#   2) Junie descriptor -> written to ~/.junie/models
-#   3) python venv      -> created at ./.venv on first run
+#   2) python venv      -> created at ./.venv on first run
+#   3) Junie descriptor -> written to ~/.junie/models
 #   4) gateway          -> public API on host/port from server-config.json
 #      worker           -> private inference process on port 8086
 #
@@ -46,31 +46,6 @@ BASE_DIR="$HOME/.local/share/junie-local"
 MODELS_DIR="$BASE_DIR/models"
 DOWNLOAD_DIR="$BASE_DIR/incomplete_downloads"
 export JUNIE_SERVER_CONFIG="$BASE_DIR/server-config.json"
-
-# host/port belong to the public gateway. Read them with the same lightweight
-# validation code used by gateway and worker; a missing/broken file uses the
-# existing defaults and will be normalized when the gateway starts.
-if command -v python3 >/dev/null 2>&1; then
-  CONFIG_ADDRESS="$(python3 - "$JUNIE_SERVER_CONFIG" <<'PY'
-import json
-import sys
-
-from mlx_vlm_shared.server_settings import normalize_config
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as stream:
-        raw = json.load(stream)
-    if not isinstance(raw, dict):
-        raw = {}
-except (OSError, ValueError):
-    raw = {}
-
-config, _ = normalize_config(raw)
-print(f'{config["host"]}\t{config["port"]}')
-PY
-)"
-  IFS=$'\t' read -r HOST PORT <<< "$CONFIG_ADDRESS"
-fi
 
 MODEL_ZIP_1="models--mlx-community--Qwen3.6-27B-4bit.zip"
 MODEL_SHA256_1="adf7f8d832ed994dcc6d09372036b4d12f49a4ccda066179cc64dc2dd113f91d"
@@ -158,45 +133,7 @@ install_model_if_needed "$MODEL_ZIP_2" "$MODEL_SHA256_2" "$MODEL_DIR_ID_2"
 rmdir "$DOWNLOAD_DIR" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 2) Junie model descriptor.
-#
-# The id must be the real HF repo id (slash form) because Junie sends it
-# verbatim as the "model" field and the server loads that repo.
-# enable_thinking stays disabled -- the server side relies on it (see
-# --preserve-thinking below).
-# ---------------------------------------------------------------------------
-JUNIE_MODELS_DIR="$HOME/.junie/models"
-JUNIE_MODEL_NAME="local-qwen3.6-27b-4bit-vlm"
-JUNIE_MODEL_FILE="$JUNIE_MODELS_DIR/$JUNIE_MODEL_NAME.json"
-mkdir -p "$JUNIE_MODELS_DIR"
-cat > "$JUNIE_MODEL_FILE" <<EOF
-{
-  "id": "$MODEL_ID",
-  "baseUrl": "http://localhost:$PORT/v1/chat/completions",
-  "apiType": "OpenAICompletion",
-  "temperature": 0.6,
-  "maxContextLength": 150000,
-  "extraBody": {
-    "enable_thinking": false
-  }
-}
-EOF
-echo "Junie model descriptor: $JUNIE_MODEL_FILE"
-
-# Set this model as Junie's default (same mechanism as junie-local's
-# install.sh: descriptor-file models are addressed as "custom:<file stem>").
-JUNIE_SETTINGS="$HOME/.junie/settings.json"
-if [ -f "$JUNIE_SETTINGS" ]; then
-  plutil -replace "modelForLaunch" -string "custom:$JUNIE_MODEL_NAME" \
-    "$JUNIE_SETTINGS"
-  echo "Junie default model set to $JUNIE_MODEL_NAME (restart Junie to apply)."
-else
-  echo "WARNING: Junie settings not found at $JUNIE_SETTINGS;"
-  echo "         select the $MODEL_ID model in Junie manually."
-fi
-
-# ---------------------------------------------------------------------------
-# 3) Python environment (first run only).
+# 2) Python environment (first run only).
 #
 # mlx>=0.32 ships wheels for CPython 3.10-3.14 only, while the stock
 # /usr/bin/python3 from the Xcode Command Line Tools is still 3.9 -- so the
@@ -261,6 +198,65 @@ elif [ ! -f "$VENV_MARKER" ]; then
   touch "$VENV_MARKER"
 fi
 
+PYTHON_BIN="$VENV/bin/python"
+
+# ---------------------------------------------------------------------------
+# 3) Gateway address and Junie model descriptor.
+#
+# Read the address with the managed Python created above. A missing or broken
+# config uses the defaults and will be normalized when the gateway starts.
+# ---------------------------------------------------------------------------
+CONFIG_ADDRESS="$("$PYTHON_BIN" - "$JUNIE_SERVER_CONFIG" <<'PY'
+import json
+import sys
+
+from mlx_vlm_shared.server_settings import normalize_config
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        raw = json.load(stream)
+    if not isinstance(raw, dict):
+        raw = {}
+except (OSError, ValueError):
+    raw = {}
+
+config, _ = normalize_config(raw)
+print(f'{config["host"]}\t{config["port"]}')
+PY
+)"
+IFS=$'\t' read -r HOST PORT <<< "$CONFIG_ADDRESS"
+
+# The id must be the real HF repo id because Junie sends it as the "model".
+JUNIE_MODELS_DIR="$HOME/.junie/models"
+JUNIE_MODEL_NAME="local-qwen3.6-27b-4bit-vlm"
+JUNIE_MODEL_FILE="$JUNIE_MODELS_DIR/$JUNIE_MODEL_NAME.json"
+mkdir -p "$JUNIE_MODELS_DIR"
+cat > "$JUNIE_MODEL_FILE" <<EOF
+{
+  "id": "$MODEL_ID",
+  "baseUrl": "http://localhost:$PORT/v1/chat/completions",
+  "apiType": "OpenAICompletion",
+  "temperature": 0.6,
+  "maxContextLength": 150000,
+  "extraBody": {
+    "enable_thinking": false
+  }
+}
+EOF
+echo "Junie model descriptor: $JUNIE_MODEL_FILE"
+
+# Set this model as Junie's default (same mechanism as junie-local's
+# install.sh: descriptor-file models are addressed as "custom:<file stem>").
+JUNIE_SETTINGS="$HOME/.junie/settings.json"
+if [ -f "$JUNIE_SETTINGS" ]; then
+  plutil -replace "modelForLaunch" -string "custom:$JUNIE_MODEL_NAME" \
+    "$JUNIE_SETTINGS"
+  echo "Junie default model set to $JUNIE_MODEL_NAME (restart Junie to apply)."
+else
+  echo "WARNING: Junie settings not found at $JUNIE_SETTINGS;"
+  echo "         select the $MODEL_ID model in Junie manually."
+fi
+
 # ---------------------------------------------------------------------------
 # 4) Gateway and inference worker.
 # ---------------------------------------------------------------------------
@@ -275,11 +271,6 @@ export HF_HUB_OFFLINE=1
 # Make sure "import mlx_vlm" resolves to this checkout's sources, ahead of
 # any installed package.
 export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
-
-PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
-if [ ! -x "$PYTHON_BIN" ]; then
-  PYTHON_BIN="python3"
-fi
 
 if [ "$PORT" = "$WORKER_PORT" ]; then
   echo "ERROR: Public gateway port $PORT conflicts with private worker port $WORKER_PORT." >&2
