@@ -204,6 +204,7 @@ class WorkerSupervisor:
             logger.error(self.last_error)
             return
         self.generation += 1
+        self.consecutive_500 = 0
 
     async def _terminate_locked(self) -> None:
         process = self.process
@@ -320,6 +321,11 @@ class WorkerSupervisor:
             return
         if self._restart_task is not None and not self._restart_task.done():
             return
+        self.last_restart_reason = reason
+        self.last_error = reason
+        self.restart_count += 1
+        self.state = "restarting"
+        self._ready_event.clear()
         self._restart_task = asyncio.create_task(
             self._restart(reason, startup_failure=startup_failure),
             name="mlx-vlm-worker-restart",
@@ -338,11 +344,11 @@ class WorkerSupervisor:
                 self._restart_task = None
 
     async def _restart(self, reason: str, *, startup_failure: bool = False) -> None:
-        self.last_restart_reason = reason
-        self.last_error = reason
-        self.restart_count += 1
         if startup_failure:
             self.start_failures += 1
+        if self.desired_running and not self._closed:
+            self.state = "restarting"
+            self._ready_event.clear()
         if self.start_failures >= self.settings.max_start_failures:
             logger.error(
                 "Inference worker failed to start %d times; stopping restart loop: %s",
@@ -358,8 +364,6 @@ class WorkerSupervisor:
                     )
                 self._ready_event.set()
             return
-        self.state = "restarting"
-        self._ready_event.clear()
         logger.warning("Restarting inference worker: %s", reason)
         async with self._operation_lock:
             await self._terminate_locked()
@@ -377,6 +381,8 @@ class WorkerSupervisor:
 
     def record_worker_response(self, status_code: int, *, generation: int) -> bool:
         """Return True when this response reaches the restart threshold."""
+        if generation != self.generation:
+            return False
         if status_code == 500:
             self.consecutive_500 += 1
         else:

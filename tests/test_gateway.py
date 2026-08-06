@@ -527,6 +527,53 @@ def test_second_consecutive_500_restarts_worker(monkeypatch):
         _wait_until(lambda: len(processes) == 2)
 
 
+def test_old_worker_responses_do_not_affect_new_worker(monkeypatch):
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(
+        monkeypatch,
+        handler,
+        restart_delay_s=0.05,
+    )
+    with TestClient(app) as client:
+        supervisor = app.state.supervisor
+
+        def record_500(generation):
+            return client.portal.call(
+                lambda: supervisor.record_worker_response(
+                    500, generation=generation
+                )
+            )
+
+        _wait_until(lambda: supervisor.state == "ready")
+        old_generation = supervisor.generation
+
+        assert record_500(old_generation) is False
+        assert supervisor.consecutive_500 == 1
+
+        client.portal.call(
+            lambda: supervisor.schedule_restart(
+                "test restart", generation=old_generation
+            )
+        )
+        _wait_until(lambda: len(processes) == 2 and supervisor.state == "ready")
+        new_generation = supervisor.generation
+        assert new_generation != old_generation
+        assert supervisor.consecutive_500 == 0
+
+        assert record_500(old_generation) is False
+        assert supervisor.consecutive_500 == 0
+
+        assert record_500(new_generation) is False
+        assert supervisor.consecutive_500 == 1
+
+        assert record_500(new_generation) is True
+        assert supervisor.state == "restarting"
+
+
 def test_repeated_start_failures_stop_restart_loop(monkeypatch):
     def handler(request):
         if request.url.path == "/ready":
