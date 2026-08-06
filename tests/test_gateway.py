@@ -133,12 +133,11 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
 
         assert client.post("/stop_worker").status_code == 200
         assert client.get("/ready").status_code == 503
-        assert client.post("/v1/chat/completions", json={}).status_code == 503
         process_count = len(processes)
         time.sleep(0.06)
         assert len(processes) == process_count
 
-        assert client.post("/start_worker").status_code == 200
+        assert client.post("/v1/chat/completions", json={}).status_code == 200
         assert len(processes) == process_count + 1
 
 
@@ -228,11 +227,19 @@ def test_auto_unload_stops_idle_worker(monkeypatch, tmp_path):
         json.dumps({"model_name": "demo", "auto_unload_time": 1})
     )
 
+    captured = []
+
     def handler(request):
         if request.url.path == "/ready":
             return httpx.Response(
                 200,
                 json={"status": "ready", "loaded_model": "demo"},
+            )
+        if request.url.path == "/v1/chat/completions":
+            captured.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ok"}}]},
             )
         raise AssertionError(request.url.path)
 
@@ -246,6 +253,14 @@ def test_auto_unload_stops_idle_worker(monkeypatch, tmp_path):
         assert status["phase"] == "ready"
         assert status["model"]["loaded"] is False
         assert app.state.supervisor.desired_running is False
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "demo", "messages": [], "stream": True},
+        )
+        assert response.status_code == 200
+        assert len(processes) == 2
+        assert captured == [{"model": "demo", "messages": [], "stream": False}]
 
 
 def test_apply_restart_setting_rejects_busy_request_without_force(
