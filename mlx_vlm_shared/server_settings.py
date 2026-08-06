@@ -31,7 +31,6 @@ DEFAULT_CONFIG = {
     "apc_session_checkpoints": 15,
     "apc_disk_path": None,
     "ngram_max": 8,
-    "max_concurrent_requests": 1,
 }
 
 DEFAULT_PUBLIC_SETTINGS = {key: DEFAULT_CONFIG[key] for key in PUBLIC_SETTING_KEYS}
@@ -78,7 +77,6 @@ _VALIDATORS = {
     "apc_session_checkpoints": _is_int_in(1, 64),
     "apc_disk_path": lambda value: value is None or isinstance(value, str),
     "ngram_max": _is_int_in(1, 1024),
-    "max_concurrent_requests": _is_int_in(0, 64),
 }
 
 

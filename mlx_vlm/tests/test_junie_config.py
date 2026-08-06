@@ -58,7 +58,9 @@ def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
         "apc_enabled": True,
         "apc_disk_path": str(tmp_path / "cache"),
         "ngram_max": 6,
-        "max_concurrent_requests": 1,
+        # Not a supported setting: the launcher must ignore it and keep
+        # request processing serialized.
+        "max_concurrent_requests": 4,
     }
 
     assert launch.build_argv(cfg) == [
