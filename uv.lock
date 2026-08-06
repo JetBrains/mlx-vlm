@@ -1213,6 +1213,7 @@ name = "mlx-vlm"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "llguidance" },
     { name = "miniaudio" },
     { name = "mlx" },
@@ -1249,6 +1250,7 @@ requires-dist = [
     { name = "datasets", marker = "extra == 'train'", specifier = ">=2.19.1" },
     { name = "fastapi", specifier = ">=0.95.1" },
     { name = "gradio", marker = "extra == 'ui'", specifier = ">=5.19.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "llguidance", specifier = ">=1.7.0" },
     { name = "miniaudio", specifier = ">=1.59" },
     { name = "mlx", specifier = ">=0.32.0" },
