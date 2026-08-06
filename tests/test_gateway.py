@@ -34,7 +34,13 @@ class FakeProcess:
         return self.returncode
 
 
-def _gateway(monkeypatch, handler, **settings_overrides):
+def _gateway(
+    monkeypatch,
+    handler,
+    *,
+    shutdown_callback=None,
+    **settings_overrides,
+):
     processes = []
 
     async def fake_create_subprocess(*_args, **_kwargs):
@@ -74,7 +80,14 @@ def _gateway(monkeypatch, handler, **settings_overrides):
     )
     setting_values.update(settings_overrides)
     settings = GatewaySettings(**setting_values)
-    return create_app(settings, client_factory=client_factory), processes
+    return (
+        create_app(
+            settings,
+            client_factory=client_factory,
+            shutdown_callback=shutdown_callback,
+        ),
+        processes,
+    )
 
 
 def _wait_until(predicate, timeout=1.0):
@@ -106,6 +119,11 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
             )
         if request.url.path == "/metrics":
             return httpx.Response(200, json={"requests": {"completed": 1}})
+        if request.url.path == "/health":
+            return httpx.Response(
+                200,
+                json={"status": "healthy", "loaded_model": "demo"},
+            )
         if request.url.path == "/cache/stats":
             return httpx.Response(200, json={"enabled": True})
         if request.url.path == "/cache/reset":
@@ -128,8 +146,15 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
         metrics = client.get("/metrics").json()
         assert metrics["requests"]["completed"] == 1
         assert metrics["gateway"]["requests_completed"] == 1
+        assert client.get("/v1/metrics").status_code == 200
+        assert client.get("/health").json() == {
+            "status": "healthy",
+            "loaded_model": "demo",
+        }
         assert client.get("/cache/stats").json() == {"enabled": True}
+        assert client.get("/v1/cache/stats").json() == {"enabled": True}
         assert client.post("/cache/reset").json() == {"status": "cleared"}
+        assert client.post("/v1/cache/reset").json() == {"status": "cleared"}
 
         assert client.post("/stop_worker").status_code == 200
         assert client.get("/ready").status_code == 503
@@ -349,6 +374,32 @@ def test_force_apply_restarts_worker_without_stale_request_restart(
         time.sleep(0.06)
         assert len(processes) == 2
         assert json.loads(config_path.read_text())["kv_quantization"] is True
+
+
+def test_shutdown_stops_worker_and_gateway_accepts_v1_alias(monkeypatch):
+    shutdown_called = threading.Event()
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(
+        monkeypatch,
+        handler,
+        shutdown_callback=shutdown_called.set,
+    )
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+
+        response = client.post("/v1/shutdown")
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "shutting_down"}
+        assert processes[0].returncode == 0
+        assert client.get("/status").json()["phase"] == "stopping"
+        assert client.post("/v1/chat/completions", json={}).status_code == 503
+        assert shutdown_called.wait(timeout=1.0)
 
 
 def test_second_consecutive_500_restarts_worker(monkeypatch):

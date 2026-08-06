@@ -334,6 +334,7 @@ def _proxy_response(response: httpx.Response) -> Response:
 def create_app(
     settings: GatewaySettings,
     client_factory: Optional[Callable[[httpx.Timeout], httpx.AsyncClient]] = None,
+    shutdown_callback: Optional[Callable[[], None]] = None,
 ) -> FastAPI:
     async def stop_idle_worker(app: FastAPI) -> None:
         while True:
@@ -382,6 +383,7 @@ def create_app(
         app.state.supervisor = supervisor
         app.state.settings_store = SettingsStore(settings.config_path)
         app.state.lifecycle_lock = asyncio.Lock()
+        app.state.shutting_down = False
         await supervisor.open()
         idle_task = asyncio.create_task(
             stop_idle_worker(app),
@@ -409,11 +411,14 @@ def create_app(
     def status_payload(request: Request) -> dict:
         sup = supervisor(request)
         current = settings_store(request).current()
-        phase = {
-            "starting": "loading_model",
-            "restarting": "restarting",
-            "stopping": "stopping",
-        }.get(sup.state, "ready")
+        if request.app.state.shutting_down:
+            phase = "stopping"
+        else:
+            phase = {
+                "starting": "loading_model",
+                "restarting": "restarting",
+                "stopping": "stopping",
+            }.get(sup.state, "ready")
         model_id = sup.worker_health.get("loaded_model") or current["model_name"]
         return {
             "phase": phase,
@@ -509,7 +514,30 @@ def create_app(
 
     @app.get("/health")
     async def health(request: Request):
-        return {"status": "healthy", "worker": supervisor(request).snapshot()}
+        sup = supervisor(request)
+        if sup.state == "ready":
+            try:
+                response = await request.app.state.client.get(
+                    f"{settings.worker_url}/health",
+                    timeout=settings.probe_timeout_s,
+                )
+                if response.status_code == 200:
+                    return JSONResponse(response.json())
+            except (httpx.RequestError, ValueError):
+                pass
+        current = settings_store(request).current()
+        return {
+            "status": "healthy",
+            "loaded_model": None,
+            "loaded_adapter": None,
+            "loaded_models": {},
+            "loaded_context_size": None,
+            "configured_context_limit": current["max_context_length"],
+            "effective_context_limit": None,
+            "loaded_tool_parser": None,
+            "continuous_batching_enabled": False,
+            "apc_enabled": False,
+        }
 
     @app.get("/ready")
     async def ready(request: Request):
@@ -534,12 +562,16 @@ def create_app(
         sup = supervisor(request)
         if sup.state != "ready":
             raise HTTPException(status_code=503, detail="Inference worker is not ready")
+        worker_generation = sup.generation
         try:
             response = await request.app.state.client.request(
                 method, f"{settings.worker_url}{path}"
             )
         except httpx.RequestError as exc:
-            sup.schedule_restart(f"worker connection failed: {exc}")
+            sup.schedule_restart(
+                f"worker connection failed: {exc}",
+                generation=worker_generation,
+            )
             raise HTTPException(
                 status_code=503,
                 detail="Inference worker restarted; please retry",
@@ -547,6 +579,7 @@ def create_app(
         return response
 
     @app.get("/metrics")
+    @app.get("/v1/metrics", include_in_schema=False)
     async def metrics(request: Request):
         response = await management_proxy(request, "GET", "/metrics")
         try:
@@ -557,20 +590,42 @@ def create_app(
         return JSONResponse(payload, status_code=response.status_code)
 
     @app.get("/cache/stats")
+    @app.get("/v1/cache/stats", include_in_schema=False)
     async def cache_stats(request: Request):
         return _proxy_response(
             await management_proxy(request, "GET", "/cache/stats")
         )
 
     @app.post("/cache/reset")
+    @app.post("/v1/cache/reset", include_in_schema=False)
     async def cache_reset(request: Request):
         return _proxy_response(
             await management_proxy(request, "POST", "/cache/reset")
         )
 
+    @app.post("/shutdown")
+    @app.post("/v1/shutdown", include_in_schema=False)
+    async def shutdown(request: Request):
+        if request.app.state.shutting_down:
+            return {"status": "shutting_down"}
+        request.app.state.shutting_down = True
+        async with request.app.state.lifecycle_lock:
+            await supervisor(request).stop_worker()
+
+        callback = shutdown_callback
+        if callback is None:
+            callback = lambda: os.kill(os.getpid(), signal.SIGTERM)
+        asyncio.get_running_loop().call_later(0.05, callback)
+        return {"status": "shutting_down"}
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         sup = supervisor(request)
+        if request.app.state.shutting_down:
+            raise HTTPException(
+                status_code=503,
+                detail="Model serving is unavailable: server phase is 'stopping'.",
+            )
         try:
             payload = await request.json()
         except ValueError as exc:
