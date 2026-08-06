@@ -33,7 +33,6 @@ MODEL_ID="mlx-community/Qwen3.6-27B-4bit"
 # showed the configured depth 3 is optimal (2/4/5/6 are all slower) and the
 # adaptive controller already handles bursts. Per-request acceptance shows
 # up in the log as "Speculative decode: ... accepted_tokens_per_round=".
-DRAFT_MODEL_ID="mlx-community/Qwen3.6-27B-MTP-4bit"
 
 # ---------------------------------------------------------------------------
 # 1) Model weights (download style borrowed from junie-local's install.sh:
@@ -45,6 +44,7 @@ BASE_URL="https://download.jetbrains.com/resources/junie-local"
 BASE_DIR="$HOME/.local/share/junie-local"
 MODELS_DIR="$BASE_DIR/models"
 DOWNLOAD_DIR="$BASE_DIR/incomplete_downloads"
+export JUNIE_SERVER_CONFIG="$BASE_DIR/server-config.json"
 
 MODEL_ZIP_1="models--mlx-community--Qwen3.6-27B-4bit.zip"
 MODEL_SHA256_1="adf7f8d832ed994dcc6d09372036b4d12f49a4ccda066179cc64dc2dd113f91d"
@@ -255,45 +255,15 @@ if [ ! -x "$PYTHON_BIN" ]; then
   PYTHON_BIN="python3"
 fi
 
-# Cross-request KV cache reuse (Automatic Prefix Caching). Qwen3.6 is a
-# hybrid linear-attention model, so APC uses session storage: ONE shared
-# full-attention KV set per conversation (~64 KiB/token, e.g. ~9 GiB at 150k)
-# plus small recurrent-state checkpoints at the last few prefix lengths, so
-# a warm hit can resume from any recent checkpoint -- including one before a
-# mid-history edit. Verify via "APC enabled (...)" and GET /v1/cache/stats.
-# Note: --preserve-thinking (below) is required for warm hits to survive new
-# user turns -- without it the Qwen3.6 chat template re-renders older
-# assistant turns (drops their <think> blocks) whenever a new user message
-# arrives, which changes the token stream mid-history and misses the cache.
-export APC_ENABLED=1
-export APC_EXACT_SESSIONS=2        # concurrent conversations kept warm
-export APC_SESSION_CHECKPOINTS=8   # resumable positions per conversation
-# Persist the pinned seed snapshot on SSD so it survives restarts (only the
-# seed is written -- APC_DISK_EXACT_SCOPE defaults to "pinned", so the disk
-# tier stays at ~1 GB instead of one multi-GB snapshot per request).
-export APC_DISK_PATH="$BASE_DIR/apc-cache"
+# Model, drafter, prefill, prompt/KV cache and warmup settings come from
+# JUNIE_SERVER_CONFIG through mlx_vlm.server.junie. The gateway keeps the
+# worker transport private on localhost port 8086.
 
 # Stop an individual non-streaming request cleanly before Junie's five-minute
 # retry window. The gateway has a separate 275-second hard limit for workers
 # that cannot acknowledge cancellation.
 export MLX_VLM_SOFT_REQUEST_TIMEOUT=270
 
-# Stable cross-session prompt prefix (Junie system message + tool schemas +
-# first user message; byte-identical across sessions). Prefilled once at
-# startup, pinned in APC (never evicted, doesn't count against
-# APC_EXACT_SESSIONS), and persisted via APC_DISK_PATH — so the FIRST
-# request of a brand-new Junie session already warm-starts. Watch for
-# "Seed prefix warmed and pinned" in the log.
-SEED_REQUEST="$SCRIPT_DIR/research/junie.json"
-
-# W8A8 int8 prefill on the M5 neural accelerators (see
-# research/int8-nax/README.md). int8 weight tensors are built per layer by a
-# fused kernel and freed right after use (MLX_VLM_INT8_CACHE=none default),
-# so peak memory overhead is ~one layer, not a 24 GB copy; the larger
-# prefill step amortizes the per-chunk rebuild (4096 measured best:
-# ~1000 tok/s at 24.8 GB peak on a 12.6k prompt). If a quality issue shows
-# up on real workloads, first try MLX_VLM_INT8_SCOPE=mlp (keeps attention
-# numerics untouched), then drop --int8-prefill entirely.
 exec "$PYTHON_BIN" -m mlx_vlm_gateway \
   --host 0.0.0.0 \
   --port "$PORT" \
@@ -301,14 +271,6 @@ exec "$PYTHON_BIN" -m mlx_vlm_gateway \
   --startup-timeout 120 \
   --request-timeout 275 \
   -- \
-  "$PYTHON_BIN" -m mlx_vlm.server \
+  "$PYTHON_BIN" -m mlx_vlm.server.junie \
   --host 127.0.0.1 \
-  --port "$WORKER_PORT" \
-  --model "$MODEL_ID" \
-  --draft-model "$DRAFT_MODEL_ID" \
-  --draft-kind mtp \
-  --int8-prefill \
-  --prefill-step-size 4096 \
-  --preserve-thinking \
-  --seed-request "$SEED_REQUEST" \
-  --log-raw-tokens
+  --port "$WORKER_PORT"

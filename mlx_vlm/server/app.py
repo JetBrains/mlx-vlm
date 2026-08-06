@@ -412,6 +412,13 @@ def _start_seed_prefix_warmup() -> None:
 
 @asynccontextmanager
 async def lifespan(app):
+    # The Junie launcher keeps model/runtime settings in a persistent JSON
+    # file. Apply them before reading any model or MLX environment options.
+    if os.environ.get("JUNIE_SERVER_CONFIG"):
+        from .junie.config import initialize_from_config
+
+        initialize_from_config()
+
     dequant_prefill = os.environ.get("MLX_VLM_DEQUANT_PREFILL", "")
     if dequant_prefill.lower() in ("1", "true", "yes", "on"):
         from ..dequant_prefill import apply as _apply_dequant_prefill
