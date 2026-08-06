@@ -332,6 +332,38 @@ def test_apply_restart_setting_rejects_busy_request_without_force(
         assert "max_context_length" not in json.loads(config_path.read_text())
 
 
+def test_config_save_failure_keeps_worker_running(monkeypatch, tmp_path):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(json.dumps({"model_name": "demo", "kv_quantization": False}))
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
+    with TestClient(app, raise_server_exceptions=False) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+
+        def fail_save(_updates):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(app.state.settings_store, "save", fail_save)
+        response = client.post(
+            "/apply_settings",
+            json={"kv_quantization": True},
+        )
+
+        assert response.status_code == 500
+        assert response.json() == {
+            "detail": "Failed to save settings; worker state was not changed."
+        }
+        assert len(processes) == 1
+        assert processes[0].returncode is None
+        assert json.loads(config_path.read_text())["kv_quantization"] is False
+        assert [item.name for item in tmp_path.iterdir()] == ["server-config.json"]
+
+
 def test_applying_current_model_is_a_noop(monkeypatch, tmp_path):
     model = "mlx-community/Qwen3.6-27B-4bit"
     config_path = tmp_path / "server-config.json"

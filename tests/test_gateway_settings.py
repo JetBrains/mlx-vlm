@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+import mlx_vlm_gateway.settings as settings_module
 from mlx_vlm_gateway.settings import (
     DEFAULT_PUBLIC_SETTINGS,
     SettingsStore,
@@ -32,6 +33,27 @@ def test_settings_store_reads_and_preserves_worker_config(tmp_path):
     persisted = json.loads(path.read_text())
     assert persisted["draft_model"] == "draft-model"
     assert persisted["prefill_step_size"] == 1024
+    assert [item.name for item in tmp_path.iterdir()] == ["server-config.json"]
+
+
+def test_settings_store_keeps_old_config_when_atomic_replace_fails(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "server-config.json"
+    original = {"model_name": "old-model", "kv_quantization": False}
+    path.write_text(json.dumps(original))
+    store = SettingsStore(str(path))
+
+    def fail_replace(_source, _target):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings_module.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="disk full"):
+        store.save({"kv_quantization": True})
+
+    assert json.loads(path.read_text()) == original
+    assert [item.name for item in tmp_path.iterdir()] == ["server-config.json"]
 
 
 @pytest.mark.parametrize(

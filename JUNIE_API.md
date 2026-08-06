@@ -114,6 +114,9 @@ Settings are stored in
 `~/.local/share/junie-local/server-config.json`. The file is created from
 defaults on first start. Writes preserve worker-only tuning fields and use an
 atomic file replacement, so an interrupted write does not leave partial JSON.
+There is only one persistent config file. Restart settings are validated and
+saved before the running worker is stopped; if saving fails, that worker keeps
+running with the previous settings.
 
 ## Shutdown and monitoring
 

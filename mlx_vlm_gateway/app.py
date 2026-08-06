@@ -495,12 +495,22 @@ def create_app(
                     "settings": current,
                 }
 
+            def persist_updates() -> dict:
+                try:
+                    return store.save(updates)
+                except OSError as exc:
+                    logger.error("Failed to save settings: %s", exc)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to save settings; worker state was not changed.",
+                    ) from exc
+
             restart_changes = set(updates) & RESTART_SETTING_KEYS
             if not restart_changes:
                 return {
                     "status": "applied",
                     "changes": sorted(updates),
-                    "settings": store.save(updates),
+                    "settings": persist_updates(),
                 }
 
             if sup.state in {"starting", "restarting", "stopping"}:
@@ -520,8 +530,8 @@ def create_app(
                 )
 
             target = {**current, **updates}
+            persist_updates()
             await sup.stop_worker()
-            store.save(updates)
             await sup.start_worker(wait_ready=False)
             return {
                 "status": "applying",

@@ -1,6 +1,5 @@
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -103,18 +102,15 @@ class SettingsStore:
         current_file.update(updates)
         if self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, temporary = tempfile.mkstemp(
-                dir=self.path.parent,
-                prefix=".server-config-",
-            )
+            temporary = self.path.with_name(f".{self.path.name}.tmp")
             try:
-                with os.fdopen(fd, "w") as stream:
+                with temporary.open("w", encoding="utf-8") as stream:
                     json.dump(current_file, stream, indent=2)
                     stream.write("\n")
                 os.replace(temporary, self.path)
             except BaseException:
                 try:
-                    os.unlink(temporary)
+                    temporary.unlink()
                 except OSError:
                     pass
                 raise
