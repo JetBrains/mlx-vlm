@@ -133,7 +133,7 @@ install_model_if_needed "$MODEL_ZIP_2" "$MODEL_SHA256_2" "$MODEL_DIR_ID_2"
 rmdir "$DOWNLOAD_DIR" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 2) Python environment (first run only).
+# 2) Managed Python environment.
 #
 # mlx>=0.32 ships wheels for CPython 3.10-3.14 only, while the stock
 # /usr/bin/python3 from the Xcode Command Line Tools is still 3.9 -- so the
@@ -143,7 +143,6 @@ rmdir "$DOWNLOAD_DIR" 2>/dev/null || true
 # bootstraps stays inside the repo dir (gitignored).
 # ---------------------------------------------------------------------------
 VENV="$SCRIPT_DIR/.venv"
-VENV_MARKER="$VENV/.deps-installed"
 VENV_PYTHON_VERSION=3.13
 UV_DIR="$SCRIPT_DIR/.uv"
 
@@ -169,34 +168,18 @@ if ! UV_BIN="$(find_uv)"; then
   UV_BIN="$UV_DIR/bin/uv"
 fi
 
-# A venv built by an older run with Python <3.10 can never install the
-# dependencies -- rebuild it.
+# Keep the project environment on the same Python version used by the lock.
 if [ -x "$VENV/bin/python" ] \
-   && ! "$VENV/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
+   && ! "$VENV/bin/python" -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 13) else 1)' \
         >/dev/null 2>&1; then
-  echo "Existing virtualenv uses Python <3.10; recreating it..."
+  echo "Existing virtualenv does not use Python $VENV_PYTHON_VERSION; recreating it..."
   rm -rf "$VENV"
 fi
 
-if [ ! -x "$VENV/bin/python" ]; then
-  echo "Creating virtualenv at $VENV (Python $VENV_PYTHON_VERSION via uv) ..."
-  venv_setup_failed() {
-    rm -rf "$VENV"
-  }
-  trap venv_setup_failed EXIT
-  # Downloads a managed CPython automatically when the machine has none.
-  "$UV_BIN" venv --python "$VENV_PYTHON_VERSION" "$VENV"
-  "$UV_BIN" pip install --python "$VENV/bin/python" -r "$SCRIPT_DIR/requirements.txt"
-  touch "$VENV_MARKER"
-  trap - EXIT
-elif [ ! -f "$VENV_MARKER" ]; then
-  # Venv exists but a previous run died before finishing the dependency
-  # install (or predates the marker). The install is a fast no-op when
-  # everything is already satisfied.
-  echo "Verifying virtualenv dependencies..."
-  "$UV_BIN" pip install --python "$VENV/bin/python" -r "$SCRIPT_DIR/requirements.txt"
-  touch "$VENV_MARKER"
-fi
+# This creates the venv and managed Python when missing. On later starts it is
+# a fast no-op unless uv.lock changed. --locked prevents silent version drift.
+echo "Syncing locked Python dependencies..."
+"$UV_BIN" sync --locked --python "$VENV_PYTHON_VERSION"
 
 PYTHON_BIN="$VENV/bin/python"
 
