@@ -72,7 +72,9 @@ auto-unloaded worker is represented as `phase: "ready"` with
 }
 ```
 
-- `model_name`: non-empty string.
+- `model_name`: informational; only the installed
+  `mlx-community/Qwen3.6-27B-4bit` value is accepted. Other values return
+  `400` without changing config or stopping the worker.
 - `max_context_length`: positive integer or `null`.
 - `kv_quantization`: boolean.
 - `auto_unload_time`: positive integer seconds or `null` to disable.

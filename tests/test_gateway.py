@@ -220,7 +220,15 @@ def test_junie_status_and_settings_endpoints(monkeypatch, tmp_path):
 
 def test_apply_auto_unload_time_without_restarting_worker(monkeypatch, tmp_path):
     config_path = tmp_path / "server-config.json"
-    config_path.write_text(json.dumps({"model_name": "demo", "internal": 7}))
+    config_path.write_text(
+        json.dumps(
+            {
+                "model_name": "demo",
+                "auto_unload_time": None,
+                "internal": 7,
+            }
+        )
+    )
 
     def handler(request):
         if request.url.path == "/ready":
@@ -320,11 +328,33 @@ def test_apply_restart_setting_rejects_busy_request_without_force(
         assert "max_context_length" not in json.loads(config_path.read_text())
 
 
+def test_applying_current_model_is_a_noop(monkeypatch, tmp_path):
+    model = "mlx-community/Qwen3.6-27B-4bit"
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(json.dumps({"model_name": model}))
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+
+        response = client.post("/apply_settings", json={"model_name": model})
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "applied"
+        assert response.json()["changes"] == []
+        assert len(processes) == 1
+
+
 def test_force_apply_restarts_worker_without_stale_request_restart(
     monkeypatch, tmp_path
 ):
     config_path = tmp_path / "server-config.json"
-    config_path.write_text(json.dumps({"model_name": "demo"}))
+    config_path.write_text(json.dumps({"model_name": "demo", "kv_quantization": False}))
     inference_started = threading.Event()
     processes = None
 

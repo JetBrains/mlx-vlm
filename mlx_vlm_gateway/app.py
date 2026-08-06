@@ -478,6 +478,19 @@ def create_app(
 
         async with lock:
             sup = supervisor(request)
+            current = store.current()
+            updates = {
+                key: value
+                for key, value in updates.items()
+                if current.get(key) != value
+            }
+            if not updates:
+                return {
+                    "status": "applied",
+                    "changes": [],
+                    "settings": current,
+                }
+
             restart_changes = set(updates) & RESTART_SETTING_KEYS
             if not restart_changes:
                 return {
@@ -502,7 +515,7 @@ def create_app(
                     ),
                 )
 
-            target = {**store.current(), **updates}
+            target = {**current, **updates}
             await sup.stop_worker()
             store.save(updates)
             await sup.start_worker(wait_ready=False)

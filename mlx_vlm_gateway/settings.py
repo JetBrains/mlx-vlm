@@ -75,6 +75,11 @@ class SettingsStore:
                     '"model_name" must be a non-empty string.'
                 )
             updates["model_name"] = value.strip()
+            if updates["model_name"] != DEFAULT_PUBLIC_SETTINGS["model_name"]:
+                raise SettingsValidationError(
+                    "Model switching is not supported. Available model: "
+                    f"{DEFAULT_PUBLIC_SETTINGS['model_name']}"
+                )
 
         for key in ("max_context_length", "auto_unload_time"):
             if key not in updates:
