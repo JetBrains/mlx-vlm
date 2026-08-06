@@ -4210,7 +4210,9 @@ def test_ready_requires_loaded_model_and_live_generation_thread(client, monkeypa
 
     response = client.get("/ready")
     assert response.status_code == 200
-    assert response.json()["status"] == "ready"
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert set(payload["memory"]) == {"total_gb", "peak_gb", "kv_cache_gb"}
 
     generator.is_alive = lambda: False
     response = client.get("/ready")

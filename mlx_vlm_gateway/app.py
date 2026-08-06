@@ -135,6 +135,7 @@ def create_app(
                 "draft_model": settings_store(request).draft_model(),
                 "context_limit": current["max_context_length"],
             },
+            "memory": sup.worker_health.get("memory") or {},
             "inference": {
                 "in_progress": sup.active_requests > 0,
                 "in_flight": sup.active_requests,

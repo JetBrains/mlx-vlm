@@ -967,11 +967,14 @@ async def readiness_check(request: Request):
         and snapshot["continuous_batching_enabled"]
         and snapshot["generation_thread_alive"]
     )
+    from .junie.memory import memory_stats
+
     return JSONResponse(
         {
             "status": "ready" if ready else "not_ready",
             "loaded_model": snapshot["loaded_model"],
             "generation_thread_alive": snapshot["generation_thread_alive"],
+            "memory": memory_stats(),
         },
         status_code=200 if ready else 503,
     )

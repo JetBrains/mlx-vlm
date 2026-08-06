@@ -39,6 +39,11 @@ and then forwards the same request.
     "draft_model": "mlx-community/Qwen3.6-27B-MTP-4bit",
     "context_limit": null
   },
+  "memory": {
+    "total_gb": 19.06,
+    "peak_gb": 21.49,
+    "kv_cache_gb": 1.9
+  },
   "inference": {
     "in_progress": false,
     "in_flight": 0,
@@ -53,6 +58,18 @@ After three consecutive startup failures, the gateway enters `error` instead
 of restarting forever; settings can still be changed to retry startup. An
 auto-unloaded worker is represented as `phase: "ready"` with
 `model.loaded: false`, because the gateway is ready to start it on demand.
+
+- `memory.total_gb` — the worker process's physical footprint (same number
+  Activity Monitor shows), including the model weights and all caches.
+- `memory.peak_gb` — lifetime maximum of that footprint (worst case this
+  worker run has needed).
+- `memory.kv_cache_gb` — in-RAM KV held by the prefix cache (warm
+  conversations + the pinned seed). This is the one part that can be freed
+  without unloading the model: `POST /v1/cache/reset` releases it at the
+  cost of the next requests re-prefilling their context.
+- `memory` is `{}` when the worker is stopped (auto-unloaded or not yet
+  started) — it comes from the worker's own `/ready` probe, which the
+  gateway polls every few seconds while the worker is up.
 
 ## Settings
 

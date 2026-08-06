@@ -236,12 +236,37 @@ def test_junie_status_and_settings_endpoints(monkeypatch, tmp_path):
             "draft_model": "demo-draft",
             "context_limit": 12345,
         }
+        assert status["memory"] == {}
         assert status["inference"] == {
             "in_progress": False,
             "in_flight": 0,
             "queue_depth": 0,
             "requests": [],
         }
+
+
+def test_status_reports_worker_memory_from_ready_probe(monkeypatch, tmp_path):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(json.dumps({"model_name": "demo-model"}))
+
+    memory = {"total_gb": 19.06, "peak_gb": 21.49, "kv_cache_gb": 1.9}
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ready",
+                    "loaded_model": "demo-model",
+                    "memory": memory,
+                },
+            )
+        raise AssertionError(request.url.path)
+
+    app, _ = _gateway(monkeypatch, handler, config_path=str(config_path))
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+        assert client.get("/status").json()["memory"] == memory
 
 
 def test_apply_auto_unload_time_without_restarting_worker(monkeypatch, tmp_path):
