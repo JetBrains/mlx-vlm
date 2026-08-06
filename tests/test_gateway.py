@@ -192,6 +192,123 @@ def test_junie_status_and_settings_endpoints(monkeypatch, tmp_path):
         }
 
 
+def test_apply_auto_unload_time_without_restarting_worker(monkeypatch, tmp_path):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(json.dumps({"model_name": "demo", "internal": 7}))
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+        response = client.post("/apply_settings", json={"auto_unload_time": 600})
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "applied",
+            "changes": ["auto_unload_time"],
+            "settings": {
+                "model_name": "demo",
+                "max_context_length": None,
+                "kv_quantization": False,
+                "auto_unload_time": 600,
+            },
+        }
+        assert len(processes) == 1
+        assert json.loads(config_path.read_text())["internal"] == 7
+
+
+def test_apply_restart_setting_rejects_busy_request_without_force(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(json.dumps({"model_name": "demo"}))
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+        app.state.supervisor.active_requests = 1
+        response = client.post(
+            "/v1/apply_settings",
+            json={"max_context_length": 150000},
+        )
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "detail": (
+                "1 inference request(s) in flight; pass \"force\": true "
+                "to restart model serving anyway."
+            )
+        }
+        assert len(processes) == 1
+        assert "max_context_length" not in json.loads(config_path.read_text())
+
+
+def test_force_apply_restarts_worker_without_stale_request_restart(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(json.dumps({"model_name": "demo"}))
+    inference_started = threading.Event()
+    processes = None
+
+    async def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            inference_started.set()
+            while len(processes) < 2:
+                await asyncio.sleep(0.005)
+            raise httpx.ConnectError("old worker stopped", request=request)
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(
+        monkeypatch,
+        handler,
+        config_path=str(config_path),
+    )
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+        result = {}
+
+        def send_request():
+            result["response"] = client.post("/v1/chat/completions", json={})
+
+        request_thread = threading.Thread(target=send_request)
+        request_thread.start()
+        assert inference_started.wait(timeout=1.0)
+
+        response = client.post(
+            "/apply_settings",
+            json={"kv_quantization": True, "force": True},
+        )
+        request_thread.join(timeout=1.0)
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "applying",
+            "model": "demo",
+            "changes": ["kv_quantization"],
+            "message": (
+                "Model serving is restarting; poll GET /status until "
+                "phase is 'ready'."
+            ),
+        }
+        assert not request_thread.is_alive()
+        assert result["response"].status_code == 503
+        time.sleep(0.06)
+        assert len(processes) == 2
+        assert json.loads(config_path.read_text())["kv_quantization"] is True
+
+
 def test_second_consecutive_500_restarts_worker(monkeypatch):
     inference_calls = 0
 

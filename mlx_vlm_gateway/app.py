@@ -13,7 +13,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from .settings import SettingsStore
+from .settings import RESTART_SETTING_KEYS, SettingsStore, SettingsValidationError
 
 
 logger = logging.getLogger("mlx_vlm.gateway")
@@ -55,6 +55,7 @@ class WorkerSupervisor:
         self.requests_completed = 0
         self.requests_failed = 0
         self.active_requests = 0
+        self.generation = 0
         self._started_at = time.monotonic()
         self._spawned_at: Optional[float] = None
         self._ready_event = asyncio.Event()
@@ -82,6 +83,7 @@ class WorkerSupervisor:
             "last_restart_reason": self.last_restart_reason,
             "last_error": self.last_error,
             "active_requests": self.active_requests,
+            "generation": self.generation,
             "uptime_s": max(0.0, time.monotonic() - self._started_at),
             "worker": self.worker_health,
         }
@@ -156,6 +158,7 @@ class WorkerSupervisor:
         if os.name != "nt":
             kwargs["start_new_session"] = True
         self.process = await asyncio.create_subprocess_exec(*command, **kwargs)
+        self.generation += 1
         self._spawned_at = time.monotonic()
         self._ready_event.clear()
         self.worker_health = {}
@@ -252,7 +255,9 @@ class WorkerSupervisor:
             except Exception:
                 logger.exception("Worker monitor failed")
 
-    def schedule_restart(self, reason: str) -> None:
+    def schedule_restart(self, reason: str, *, generation: Optional[int] = None) -> None:
+        if generation is not None and generation != self.generation:
+            return
         if not self.desired_running or self._closed:
             return
         if self._restart_task is not None and not self._restart_task.done():
@@ -294,7 +299,7 @@ class WorkerSupervisor:
                 return
             await self._spawn_locked()
 
-    def record_worker_response(self, status_code: int) -> bool:
+    def record_worker_response(self, status_code: int, *, generation: int) -> bool:
         """Return True when this response reaches the restart threshold."""
         if status_code == 500:
             self.consecutive_500 += 1
@@ -303,7 +308,10 @@ class WorkerSupervisor:
         if self.consecutive_500 < 2:
             return False
         self.consecutive_500 = 0
-        self.schedule_restart("two consecutive worker HTTP 500 responses")
+        self.schedule_restart(
+            "two consecutive worker HTTP 500 responses",
+            generation=generation,
+        )
         return True
 
 
@@ -340,6 +348,7 @@ def create_app(
         app.state.client = client
         app.state.supervisor = supervisor
         app.state.settings_store = SettingsStore(settings.config_path)
+        app.state.lifecycle_lock = asyncio.Lock()
         await supervisor.open()
         try:
             yield
@@ -392,6 +401,69 @@ def create_app(
     @app.get("/v1/current_settings", include_in_schema=False)
     async def current_settings(request: Request):
         return settings_store(request).current()
+
+    @app.post("/apply_settings")
+    @app.post("/v1/apply_settings", include_in_schema=False)
+    async def apply_settings(request: Request):
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Request body must be a JSON object.",
+            ) from exc
+        store = settings_store(request)
+        try:
+            updates, force = store.validate(body)
+        except SettingsValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        lock = request.app.state.lifecycle_lock
+        if lock.locked():
+            raise HTTPException(
+                status_code=409,
+                detail="Another settings change is already in progress.",
+            )
+
+        async with lock:
+            sup = supervisor(request)
+            if sup.state in {"starting", "restarting", "stopping"}:
+                phase = status_payload(request)["phase"]
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Server is busy (phase '{phase}'); retry once it settles.",
+                )
+
+            restart_changes = set(updates) & RESTART_SETTING_KEYS
+            if not restart_changes:
+                return {
+                    "status": "applied",
+                    "changes": sorted(updates),
+                    "settings": store.save(updates),
+                }
+
+            if sup.active_requests > 0 and not force:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{sup.active_requests} inference request(s) in flight; pass "
+                        '"force": true to restart model serving anyway.'
+                    ),
+                )
+
+            target = {**store.current(), **updates}
+            await sup.stop_worker()
+            store.save(updates)
+            await sup.start_worker(wait_ready=False)
+            return {
+                "status": "applying",
+                "model": target["model_name"],
+                "changes": sorted(updates),
+                "message": (
+                    "Model serving is restarting; poll GET /status until "
+                    "phase is 'ready'."
+                ),
+            }
 
     @app.get("/health")
     async def health(request: Request):
@@ -477,6 +549,7 @@ def create_app(
 
         sup.requests_forwarded += 1
         sup.active_requests += 1
+        worker_generation = sup.generation
         try:
             response = await request.app.state.client.post(
                 f"{settings.worker_url}/v1/chat/completions",
@@ -486,13 +559,19 @@ def create_app(
             )
         except httpx.TimeoutException as exc:
             sup.requests_failed += 1
-            sup.schedule_restart("worker exceeded hard request timeout")
+            sup.schedule_restart(
+                "worker exceeded hard request timeout",
+                generation=worker_generation,
+            )
             raise HTTPException(
                 status_code=504, detail="Inference worker did not stop in time"
             ) from exc
         except httpx.RequestError as exc:
             sup.requests_failed += 1
-            sup.schedule_restart(f"worker connection failed during inference: {exc}")
+            sup.schedule_restart(
+                f"worker connection failed during inference: {exc}",
+                generation=worker_generation,
+            )
             raise HTTPException(
                 status_code=503,
                 detail="Inference worker restarted; please retry",
@@ -500,7 +579,10 @@ def create_app(
         finally:
             sup.active_requests = max(0, sup.active_requests - 1)
 
-        if sup.record_worker_response(response.status_code):
+        if sup.record_worker_response(
+            response.status_code,
+            generation=worker_generation,
+        ):
             sup.requests_failed += 1
             raise HTTPException(
                 status_code=503,
