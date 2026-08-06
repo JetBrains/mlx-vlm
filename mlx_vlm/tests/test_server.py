@@ -2595,6 +2595,101 @@ def test_chat_completions_soft_timeout_cancels_generation_before_response(
         assert response.json()["choices"][0]["message"]["content"] == partial_text
 
 
+def test_chat_completions_client_disconnect_cancels_generation(client, monkeypatch):
+    """A non-streaming client that goes away must cancel the generation
+    (499) instead of running it to completion for nobody."""
+    model = SimpleNamespace()
+    processor = SimpleNamespace()
+    config = SimpleNamespace(model_type="qwen2_vl")
+    cancelled = Event()
+
+    class BlockingIterator:
+        def __init__(self):
+            self.closed = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            cancelled.wait(timeout=5.0)
+            raise StopIteration
+
+        def close(self, *, wait=False, timeout=None):
+            del wait, timeout
+            self.closed = True
+            cancelled.set()
+            return True
+
+    token_iter = BlockingIterator()
+
+    class FakeResponseGenerator:
+        tokenizer = SimpleNamespace(decode=lambda tokens: "")
+
+        def validate_context_budget(self, prompt, images=None, audio=None, args=None):
+            return None
+
+        def generate(self, prompt, images=None, audio=None, args=None):
+            return server.GenerationContext(uid=1, prompt_tokens=8), token_iter
+
+    async def fake_wait_for_disconnect(request):
+        return None
+
+    monkeypatch.delenv("MLX_VLM_SOFT_REQUEST_TIMEOUT", raising=False)
+    monkeypatch.setattr(server.runtime, "response_generator", FakeResponseGenerator())
+    monkeypatch.setattr(
+        server_openai, "_wait_for_disconnect", fake_wait_for_disconnect
+    )
+
+    with (
+        patch.object(
+            server, "get_cached_model", return_value=(model, processor, config)
+        ),
+        patch.object(server, "apply_chat_template", return_value="prompt"),
+    ):
+        response = client.post(
+            "/chat/completions",
+            json={
+                "model": "demo",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": False,
+            },
+        )
+
+    assert response.status_code == 499
+    assert cancelled.is_set()
+    assert token_iter.closed
+
+
+def test_server_header_middleware_passes_receive_through():
+    """The Server header must come from pure ASGI middleware: the
+    @app.middleware("http") wrapper (BaseHTTPMiddleware) proxies the
+    receive channel and never forwards http.disconnect, so endpoints
+    could not detect client disconnects."""
+    seen = {}
+
+    async def inner_app(scope, receive, send):
+        seen["receive"] = receive
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    middleware = server._app_module._ServerHeaderMiddleware(inner_app)
+    sent = []
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(middleware({"type": "http"}, receive, send))
+
+    # The receive channel reaches the app untouched — this is what makes
+    # Request.is_disconnected() work downstream.
+    assert seen["receive"] is receive
+    headers = dict(sent[0]["headers"])
+    assert headers[b"server"].startswith(b"mlx_vlm/")
+
+
 def test_chat_completions_streaming_forwards_explicit_sampling_args(
     client, monkeypatch
 ):

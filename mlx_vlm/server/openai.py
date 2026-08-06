@@ -17,7 +17,7 @@ from threading import Lock as ThreadLock
 from typing import Any, List, Optional, Tuple
 
 import mlx.core as mx
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from ..generate import generate, stream_generate
@@ -99,6 +99,21 @@ def _get_soft_request_timeout() -> Optional[float]:
         logger.warning("Ignoring invalid MLX_VLM_SOFT_REQUEST_TIMEOUT=%r", raw)
         return None
     return timeout if timeout > 0 else None
+
+
+async def _wait_for_disconnect(request: Request) -> None:
+    """Resolve when the client disconnects.
+
+    Starlette's own listen_for_disconnect pattern: once the request body
+    has been consumed, the only message left on the ASGI receive channel
+    is ``http.disconnect``, so awaiting it is an event-driven disconnect
+    signal (no polling). Only works because the server-header middleware
+    is pure ASGI — BaseHTTPMiddleware would swallow the message.
+    """
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            return
 
 _INHERIT_ADAPTER = None
 get_cached_model = None
@@ -2183,20 +2198,40 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                         asyncio.to_thread(_blocking_generate)
                     )
                     soft_timeout = _get_soft_request_timeout()
+                    remaining = (
+                        None
+                        if soft_timeout is None
+                        else max(
+                            0.001,
+                            soft_timeout - (time.perf_counter() - request_start),
+                        )
+                    )
+                    disconnect_task = asyncio.create_task(
+                        _wait_for_disconnect(http_request)
+                    )
+                    client_gone = False
                     try:
-                        if soft_timeout is None:
-                            generation_result = await generation_task
+                        # Race the generation against a client disconnect,
+                        # bounded by the soft request timeout.
+                        done, _ = await asyncio.wait(
+                            {generation_task, disconnect_task},
+                            timeout=remaining,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if generation_task in done:
+                            generation_result = generation_task.result()
+                        elif disconnect_task in done:
+                            client_gone = True
+                            logger.info(
+                                "Client disconnected; cancelling non-streaming "
+                                "generation."
+                            )
                         else:
-                            remaining = max(
-                                0.001,
-                                soft_timeout
-                                - (time.perf_counter() - request_start),
-                            )
-                            generation_result = await asyncio.wait_for(
-                                asyncio.shield(generation_task), timeout=remaining
-                            )
-                    except asyncio.TimeoutError:
-                        soft_timed_out = True
+                            soft_timed_out = True
+                    finally:
+                        disconnect_task.cancel()
+
+                    if soft_timed_out or client_gone:
                         cancel_requested.set()
                         with iterator_lock:
                             token_iter = iterator_holder["iterator"]
@@ -2209,6 +2244,18 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             )
                         else:
                             generation_result = await generation_task
+
+                    if client_gone:
+                        runtime.metrics.record_failure(
+                            endpoint="/chat/completions",
+                            model=request.model,
+                            stream=False,
+                            error="client_disconnected",
+                        )
+                        mx.clear_cache()
+                        gc.collect()
+                        # 499: client closed request; nobody reads this.
+                        return Response(status_code=499)
 
                     (
                         prompt_tokens,
