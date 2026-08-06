@@ -8,7 +8,8 @@ set -euo pipefail
 #   1) model weights   -> downloaded/verified into ~/.local/share/junie-local
 #   2) Junie descriptor -> written to ~/.junie/models
 #   3) python venv      -> created at ./.venv on first run
-#   4) server           -> mlx_vlm.server on port 8085
+#   4) gateway          -> public API on port 8085
+#      worker           -> private inference process on port 8086
 #
 # Steps 1-3 are no-ops when already done, so this is also the everyday
 # start command.
@@ -21,6 +22,7 @@ cd "$SCRIPT_DIR"
 exec > >(tee "$SCRIPT_DIR/mlx_server.log") 2>&1
 
 PORT=8085
+WORKER_PORT=8086
 MODEL_ID="mlx-community/Qwen3.6-27B-4bit"
 # Multi-token-prediction speculative-decoding drafter for the model above.
 # It has no standalone language_model head, so it must be passed as
@@ -234,7 +236,7 @@ elif [ ! -f "$VENV_MARKER" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 4) Server.
+# 4) Gateway and inference worker.
 # ---------------------------------------------------------------------------
 
 # The models live in a Hugging Face hub-style cache dir (models--org--name/
@@ -271,6 +273,11 @@ export APC_SESSION_CHECKPOINTS=8   # resumable positions per conversation
 # tier stays at ~1 GB instead of one multi-GB snapshot per request).
 export APC_DISK_PATH="$BASE_DIR/apc-cache"
 
+# Stop an individual non-streaming request cleanly before Junie's five-minute
+# retry window. The gateway has a separate 275-second hard limit for workers
+# that cannot acknowledge cancellation.
+export MLX_VLM_SOFT_REQUEST_TIMEOUT=270
+
 # Stable cross-session prompt prefix (Junie system message + tool schemas +
 # first user message; byte-identical across sessions). Prefilled once at
 # startup, pinned in APC (never evicted, doesn't count against
@@ -287,9 +294,16 @@ SEED_REQUEST="$SCRIPT_DIR/research/junie.json"
 # ~1000 tok/s at 24.8 GB peak on a 12.6k prompt). If a quality issue shows
 # up on real workloads, first try MLX_VLM_INT8_SCOPE=mlp (keeps attention
 # numerics untouched), then drop --int8-prefill entirely.
-exec "$PYTHON_BIN" -m mlx_vlm.server \
+exec "$PYTHON_BIN" -m mlx_vlm_gateway \
   --host 0.0.0.0 \
   --port "$PORT" \
+  --worker-url "http://127.0.0.1:$WORKER_PORT" \
+  --startup-timeout 120 \
+  --request-timeout 275 \
+  -- \
+  "$PYTHON_BIN" -m mlx_vlm.server \
+  --host 127.0.0.1 \
+  --port "$WORKER_PORT" \
   --model "$MODEL_ID" \
   --draft-model "$DRAFT_MODEL_ID" \
   --draft-kind mtp \
