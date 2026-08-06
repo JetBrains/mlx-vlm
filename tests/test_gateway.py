@@ -691,3 +691,68 @@ def test_unload_interrupts_active_request_without_restart(monkeypatch):
         time.sleep(0.06)
         assert len(processes) == process_count
         assert client.get("/ready").status_code == 503
+
+
+def test_unload_interrupts_request_waiting_for_worker_startup(monkeypatch):
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(503, json={"status": "loading"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(
+        monkeypatch,
+        handler,
+        startup_timeout_s=1.0,
+    )
+    with TestClient(app) as client:
+        _wait_until(
+            lambda: client.get("/status").json()["phase"] == "loading_model"
+        )
+        result = {}
+
+        def send_request():
+            result["response"] = client.post("/v1/chat/completions", json={})
+
+        request_thread = threading.Thread(target=send_request)
+        request_thread.start()
+        _wait_until(lambda: app.state.supervisor.active_requests == 1)
+
+        assert client.post("/unload").status_code == 200
+        request_thread.join(timeout=1.0)
+
+        assert not request_thread.is_alive()
+        assert result["response"].status_code == 503
+        assert processes[0].returncode == 0
+        assert app.state.supervisor.desired_running is False
+
+        time.sleep(0.06)
+        assert len(processes) == 1
+
+
+def test_unload_during_restart_delay_prevents_worker_respawn(monkeypatch):
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(
+        monkeypatch,
+        handler,
+        restart_delay_s=0.1,
+    )
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
+
+        client.portal.call(app.state.supervisor.schedule_restart, "test restart")
+        _wait_until(
+            lambda: app.state.supervisor.state == "restarting"
+            and app.state.supervisor.process is None
+        )
+
+        response = client.post("/unload")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "no_model_loaded"
+        assert app.state.supervisor.desired_running is False
+        time.sleep(0.15)
+        assert len(processes) == 1

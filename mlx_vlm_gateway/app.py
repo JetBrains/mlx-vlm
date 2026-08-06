@@ -132,23 +132,30 @@ class WorkerSupervisor:
             self.start_failures = 0
         self.desired_running = True
         await self._ensure_process()
-        if wait_ready and self.state != "ready":
-            try:
-                await asyncio.wait_for(
-                    self._ready_event.wait(), timeout=self.settings.startup_timeout_s
-                )
-            except asyncio.TimeoutError as exc:
-                raise RuntimeError("Worker did not become ready in time") from exc
-            if self.state != "ready":
-                raise RuntimeError(self.last_error or "Worker failed to start")
+        if wait_ready:
+            await self.wait_until_ready()
         return self.snapshot()
+
+    async def wait_until_ready(self) -> None:
+        if self.state == "ready":
+            return
+        if not self.desired_running or self.state in {"stopped", "stopping", "error"}:
+            raise RuntimeError(self.last_error or "Worker is not running")
+        try:
+            await asyncio.wait_for(
+                self._ready_event.wait(), timeout=self.settings.startup_timeout_s
+            )
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("Worker did not become ready in time") from exc
+        if self.state != "ready":
+            raise RuntimeError(self.last_error or "Worker failed to start")
 
     async def stop_worker(self) -> dict:
         self.desired_running = False
-        self._ready_event.clear()
+        self.state = "stopping"
+        self._ready_event.set()
         await self._wait_for_restart()
         async with self._operation_lock:
-            self.state = "stopping"
             await self._terminate_locked()
             self.worker_health = {}
             self.state = "stopped"
@@ -670,20 +677,21 @@ def create_app(
     @app.post("/v1/unload", include_in_schema=False)
     async def unload(request: Request):
         sup = supervisor(request)
-        process = sup.process
-        if process is None or process.returncode is not None:
-            return {
-                "status": "no_model_loaded",
-                "message": "No model is currently loaded",
-            }
-        worker = dict(sup.worker_health)
-        unloaded = {
-            "model_name": worker.get("loaded_model")
-            or settings_store(request).current()["model_name"],
-            "adapter_name": worker.get("loaded_adapter"),
-            "models": worker.get("loaded_models", {}),
-        }
         async with request.app.state.lifecycle_lock:
+            process = sup.process
+            if process is None or process.returncode is not None:
+                await sup.stop_worker()
+                return {
+                    "status": "no_model_loaded",
+                    "message": "No model is currently loaded",
+                }
+            worker = dict(sup.worker_health)
+            unloaded = {
+                "model_name": worker.get("loaded_model")
+                or settings_store(request).current()["model_name"],
+                "adapter_name": worker.get("loaded_adapter"),
+                "models": worker.get("loaded_models", {}),
+            }
             await sup.stop_worker()
         return {
             "status": "success",
@@ -761,27 +769,30 @@ def create_app(
         sup.active_requests += 1
         sup.last_activity_at = time.monotonic()
         try:
-            async with request.app.state.lifecycle_lock:
-                if request.app.state.shutting_down:
-                    raise HTTPException(
-                        status_code=503,
-                        detail=(
-                            "Model serving is unavailable: server phase is 'stopping'."
-                        ),
-                    )
-                if sup.state != "ready":
-                    try:
-                        await sup.start_worker(wait_ready=True)
-                    except RuntimeError as exc:
-                        sup.requests_failed += 1
+            try:
+                async with request.app.state.lifecycle_lock:
+                    if request.app.state.shutting_down:
                         raise HTTPException(
                             status_code=503,
                             detail=(
-                                "Inference worker did not become ready in time; "
-                                "please retry"
+                                "Model serving is unavailable: server phase is "
+                                "'stopping'."
                             ),
-                        ) from exc
-                worker_generation = sup.generation
+                        )
+                    if sup.state != "ready":
+                        await sup.start_worker(wait_ready=False)
+
+                if sup.state != "ready":
+                    await sup.wait_until_ready()
+            except RuntimeError as exc:
+                sup.requests_failed += 1
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Inference worker did not become ready in time; please retry"
+                    ),
+                ) from exc
+            worker_generation = sup.generation
 
             response = await request.app.state.client.post(
                 f"{settings.worker_url}/v1/chat/completions",
