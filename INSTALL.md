@@ -69,6 +69,7 @@ are fully KV-cached.)
 |---|---|
 | `<repo>/.venv/` | Python virtualenv (created on first run) |
 | `<repo>/mlx_server.log` | log of the current/last server run (gitignored) |
+| `~/.local/share/junie-local/server-config.json` | persistent model, context, KV quantization, idle timeout, and worker launch settings |
 | `<repo>/research/junie.json` | seed request: the stable Junie prompt prefix (system message + tool schemas + first user message), prefilled and pinned at startup |
 | `<repo>/research/junie-replay/` | captured session + replay script used by `bench.sh` |
 | `~/.local/share/junie-local/models/` | model weights, HF-hub layout (`models--mlx-community--Qwen3.6-27B-4bit`, `...-MTP-4bit`, plus `.models--*.installed` completion markers) |
@@ -84,19 +85,40 @@ are fully KV-cached.)
 | URL | What |
 |---|---|
 | `http://localhost:8085/v1/chat/completions` | OpenAI-compatible chat endpoint (this is what Junie calls); responses include a `timings` block with prefill/decode speeds and speculative-acceptance counters |
-| `http://localhost:8085/health` | gateway liveness and worker state |
-| `http://localhost:8085/ready` | `200` only when the worker and model are ready |
+| `http://localhost:8085/status` | lifecycle, loaded-model state, and active-request count |
+| `http://localhost:8085/current_settings` | persistent Junie serving settings |
+| `POST http://localhost:8085/apply_settings` | apply settings; restart the worker when required |
+| `POST http://localhost:8085/shutdown` | stop the worker and gateway and release model memory |
+| `http://localhost:8085/health` | cheap gateway liveness, even while the worker is stopped |
 | `http://localhost:8085/metrics` | inference metrics plus gateway process state |
 | `http://localhost:8085/cache/stats` | prompt/KV cache statistics |
 | `POST http://localhost:8085/cache/reset` | clear the in-memory prompt/KV cache |
-| `POST http://localhost:8085/stop_worker` | stop inference and release model memory while keeping the API gateway alive |
-| `POST http://localhost:8085/start_worker` | start the worker and wait until the model is ready |
 
 The gateway stays available if MLX or the worker process crashes. It returns
 `503` for the interrupted request and starts a fresh worker. A manual
-`/stop_worker` is different: it keeps the worker stopped until
-`/start_worker` is called, so a late Junie retry cannot immediately load the
-model again.
+settings restart is rejected with `409` while inference is active unless the
+request contains `"force": true`.
+
+Use the control script instead of hand-written curl commands:
+
+```bash
+./serverctl.sh status
+./serverctl.sh settings
+./serverctl.sh apply auto_unload_time=600
+./serverctl.sh apply max_context_length=150000
+./serverctl.sh wait
+./serverctl.sh stop
+```
+
+Changing only `auto_unload_time` is live. Model, context-limit, and KV-cache
+changes stop the worker, atomically save the config, and launch a new worker.
+If inference is active, the interactive script asks before interrupting it.
+See [JUNIE_API.md](JUNIE_API.md) for exact request and response formats.
+
+When the configured idle timeout expires, the gateway kills the worker and
+releases model memory. The next chat request starts a new worker, waits for the
+model to become ready, and then forwards that original request. The only
+supported process entrypoint remains `./start.sh`.
 
 Chat requests are batch-only; an incoming `stream: true` is changed to
 `false`. At 270 seconds the worker cancels only that generation and returns
