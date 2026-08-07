@@ -148,6 +148,13 @@ fi
   mlx_vlm_gateway/cli.py
 
 # ---------------------------------------------------------------------------
+# The control script rides along. It drives the server over HTTP and looks for
+# the binary beside itself, so the archive root is exactly where it belongs --
+# and it needs nothing from this repo at runtime, only curl and plutil.
+# ---------------------------------------------------------------------------
+install -m 755 "$SCRIPT_DIR/serverctl.sh" "$STAGE/$APP_NAME/serverctl.sh"
+
+# ---------------------------------------------------------------------------
 # Pack with tar, not zip: the tree contains symlinked dylibs that `zip -r`
 # would replace with copies. COPYFILE_DISABLE keeps xattrs out of the archive
 # so extractions carry no ._* members; the ad-hoc signatures PyInstaller
@@ -208,6 +215,15 @@ echo "Ran: $APP_NAME daemon --help (fastapi, uvicorn)"
 "$APP/$APP_NAME" worker --help >/dev/null
 echo "Ran: $APP_NAME worker --help (mlx, transformers, tokenizer)"
 
+# serverctl.sh prints its usage and exits 1 when given no command, so read the
+# output rather than the status.
+[ -x "$APP/serverctl.sh" ] || { echo "ERROR: serverctl.sh is not in the archive" >&2; exit 1; }
+CTL_USAGE="$("$APP/serverctl.sh" 2>&1 || true)"
+case "$CTL_USAGE" in
+  *"./serverctl.sh start"*) echo "Ran: serverctl.sh (usage)" ;;
+  *) echo "ERROR: serverctl.sh in the archive does not run" >&2; exit 1 ;;
+esac
+
 echo
 echo "Built $TARBALL"
 echo "  $(du -sh "$TARBALL" | awk '{print $1}') packed, \
@@ -220,5 +236,6 @@ echo "  <dir>/$APP_NAME/$APP_NAME"
 echo "It takes no options; settings come from JUNIE_SERVER_CONFIG (default"
 echo "~/.local/share/junie-local/server-config.json), and the model weights"
 echo "named there must already be installed."
+echo "Beside it, <dir>/$APP_NAME/serverctl.sh start|status|wait|settings|stop."
 echo "Browser-downloaded instead of curl'd? macOS SIGKILLs quarantined binaries:"
 echo "  xattr -dr com.apple.quarantine <dir>/$APP_NAME"
