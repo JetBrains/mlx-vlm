@@ -39,7 +39,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 APP_NAME="junie-mlx-vlm"
-VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' mlx_vlm/version.py)"
+# This binary's own version, not the upstream mlx-vlm one in
+# mlx_vlm/version.py that the Python package still carries.
+VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' mlx_vlm_gateway/version.py)"
 TARBALL="$SCRIPT_DIR/dist/$APP_NAME-$VERSION-macos-$(uname -m).tar.gz"
 PYTHON_VERSION=3.13
 
