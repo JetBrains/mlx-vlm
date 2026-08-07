@@ -2,8 +2,7 @@
 
 Serves `mlx-community/Qwen3.6-27B-4bit` on Apple Silicon as an
 OpenAI-compatible endpoint for Junie, with MTP + n-gram speculative
-decoding, prefix caching (APC) with a pinned cross-session seed, and int8
-NAX prefill.
+decoding, prefix caching (APC), and int8 NAX prefill.
 
 ## 1. Clone
 
@@ -46,9 +45,12 @@ The script only:
 
 The daemon reads every setting from `server-config.json`, serves the public
 API on its `host`/`port` (`0.0.0.0:19239` by default), and spawns the
-inference worker itself on `worker_port` (`19240`). The worker then prefills
-+ pins the shared Junie prompt prefix (~12 s; later restarts restore it from
-disk in ~0.5 s — look for `Seed prefix warmed and pinned` in the log).
+inference worker itself on `worker_port` (`19240`).
+
+Startup seeding — prefilling and pinning the shared Junie prompt prefix so
+new sessions warm-start — is **currently disabled** pending rework. Point
+`seed_request` at a chat-completions request body to turn it back on for one
+machine; nothing does so by default.
 
 The first run is a fast no-op after step 1, so `./start.sh` is also the
 everyday start command. `Ctrl-C` stops both processes and releases the model
@@ -84,10 +86,10 @@ are fully KV-cached.)
 | `<repo>/.venv/` | Python virtualenv (created on first run) |
 | `<repo>/mlx_server.log` | log of the current/last server run (gitignored) |
 | `~/.local/share/junie-local/server-config.json` | the only config: model, models dir, host/port, worker port, context, KV quantization, idle timeout, and worker launch settings (override its location with `JUNIE_SERVER_CONFIG`) |
-| `<repo>/research/junie.json` | seed request: the stable Junie prompt prefix (system message + tool schemas + first user message), prefilled and pinned at startup |
+| `<repo>/research/junie.json` | the stable Junie prompt prefix (system message + tool schemas + first user message); used by `bench.sh`, and the request body `seed_request` expects — not loaded at startup while seeding is disabled |
 | `<repo>/research/junie-replay/` | captured session + replay script used by `bench.sh` |
 | `~/.local/share/junie-local/models/` | model weights, HF-hub layout (`models--mlx-community--Qwen3.6-27B-4bit`, `...-MTP-4bit`); installed separately, relocatable via the `models_dir` setting |
-| `~/.local/share/junie-local/apc-cache/` | APC disk tier — holds only the pinned seed snapshot (~1 GB) so it survives restarts |
+| `~/.local/share/junie-local/apc-cache/` | APC disk tier — holds pinned snapshots (~1 GB each) so they survive restarts; empty while seeding is disabled |
 | `<repo>/.uv/bin/uv` | `uv` binary (only when not already installed on the machine) |
 | `<repo>/.uv/python/` | uv-managed CPython 3.13 (only when the machine has no suitable Python) |
 | `~/.junie/models/local-qwen3.6-27b-4bit-vlm.json` | Junie model descriptor pointing at this server; installed separately |
@@ -142,7 +144,8 @@ client errors such as `400` and `422` do not.
 ## What to expect in the log
 
 - `Seed prefix warmed and pinned: ... cached_tokens=14551 elapsed=0.5s` —
-  the cross-session prefix is ready; new Junie sessions warm-start.
+  the cross-session prefix is ready; new Junie sessions warm-start. Only
+  appears when `seed_request` is set, which it is not by default.
 - `Prefill completed: ... cached_tokens=...` — APC hit size per request.
 - `Speculative decode: ... accepted_tokens_per_round=... ngram_rounds=...`
   — MTP drafter + n-gram prompt-lookup acceptance per request.
@@ -160,6 +163,7 @@ behind the defaults:
 - `APC_EXACT_SESSIONS` / `APC_SESSION_CHECKPOINTS` — warm-conversation
   capacity.
 - `APC_DISK_EXACT_SCOPE=all` — persist every conversation snapshot to disk
-  (default `pinned` keeps only the seed).
+  (default `pinned` keeps only pinned ones, of which there are none while
+  seeding is disabled).
 - `MLX_VLM_INT8_SCOPE=mlp` or dropping `--int8-prefill` — fallback if
   prefill quality issues ever show up.

@@ -88,6 +88,15 @@ def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
     assert os.environ["MLX_VLM_MAX_CONCURRENT_REQUESTS"] == "1"
 
 
+def test_seed_prefill_is_off_unless_a_request_is_configured(tmp_path):
+    assert "--seed-request" not in launch.build_argv(DEFAULT_CONFIG)
+
+    seed = str(tmp_path / "seed.json")
+    argv = launch.build_argv({**DEFAULT_CONFIG, "seed_request": seed})
+
+    assert argv[argv.index("--seed-request") + 1] == seed
+
+
 def test_pre_m5_mac_uses_standard_prefill(monkeypatch):
     monkeypatch.setattr(launch, "_apple_chip_generation", lambda: 4)
 

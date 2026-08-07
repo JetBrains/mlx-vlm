@@ -19,7 +19,6 @@ import os
 import re
 import subprocess
 import sys
-from pathlib import Path
 from typing import List, Optional
 
 from mlx_vlm_shared.server_settings import (
@@ -53,13 +52,6 @@ def _apple_chip_generation() -> Optional[int]:
         return None
     match = re.search(r"\bApple M(\d+)\b", result.stdout)
     return int(match.group(1)) if match else None
-
-
-def _default_seed_request() -> Optional[str]:
-    """The repo's bundled Junie seed prompt, when running from a checkout."""
-    repo_root = Path(__file__).resolve().parents[3]
-    path = repo_root / "research" / "junie.json"
-    return str(path) if path.is_file() else None
 
 
 def apply_config_to_env(cfg: dict) -> None:
@@ -162,10 +154,11 @@ def build_argv(cfg: dict) -> List[str]:
         argv.append("--preserve-thinking")
     if cfg.get("log_raw_tokens"):
         argv.append("--log-raw-tokens")
-    seed = cfg.get("seed_request")
-    if seed is None:
-        seed = _default_seed_request()
-    if seed:
+    # No implicit seed: the launcher used to fall back to the checkout's
+    # research/junie.json, which a frozen bundle has no path to. Only an
+    # explicit setting warms a prefix, and the default leaves it off until
+    # seeding is reworked.
+    if seed := cfg.get("seed_request"):
         argv.extend(["--seed-request", str(seed)])
     return argv
 

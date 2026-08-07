@@ -65,6 +65,10 @@ DEFAULT_CONFIG = {
     "int8_prefill": True,
     "prefill_step_size": 1024,
     "preserve_thinking": True,
+    # Path to a chat-completions body whose prompt prefix is prefilled and
+    # pinned at startup. Off by default: seeding is being reworked, and the
+    # checkout-relative research/junie.json it used to default to does not
+    # exist in a packaged build.
     "seed_request": None,
     "log_raw_tokens": True,
     "apc_enabled": True,

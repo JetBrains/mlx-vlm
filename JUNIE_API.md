@@ -71,9 +71,10 @@ auto-unloaded worker is represented as `phase: "ready"` with
 - `memory.peak_gb` — lifetime maximum of that footprint (worst case this
   worker run has needed).
 - `memory.kv_cache_gb` — in-RAM KV held by the prefix cache (warm
-  conversations + the pinned seed). This is the one part that can be freed
-  without unloading the model: `POST /v1/cache/reset` releases it at the
-  cost of the next requests re-prefilling their context.
+  conversations, plus a pinned seed when one is configured). This is the
+  one part that can be freed without unloading the model:
+  `POST /v1/cache/reset` releases it at the cost of the next requests
+  re-prefilling their context.
 - `memory` is `{}` when the worker is stopped (auto-unloaded or not yet
   started) — it comes from the worker's own `/ready` probe, which the
   gateway polls every few seconds while the worker is up.
