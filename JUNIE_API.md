@@ -7,11 +7,11 @@ The gateway spawns the inference worker on the same `host` at `worker_port`
 The worker also watches its parent process and exits if the gateway crashes,
 so an orphan cannot keep model memory or port `19240` occupied.
 
-Start both through the single supported entrypoint — the frozen
-`junie-mlx-vlm` on a shipped machine, or from a checkout:
+Start both through the single supported entrypoint, which drives the frozen
+`junie-mlx-vlm` and a checkout alike:
 
 ```bash
-./start_dev.sh
+./serverctl.sh start
 ```
 
 Use `./serverctl.sh` for lifecycle and settings commands. Except for

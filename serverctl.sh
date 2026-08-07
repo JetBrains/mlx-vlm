@@ -4,7 +4,8 @@ set -euo pipefail
 # Thin curl wrapper around the local server's HTTP API (see JUNIE_API.md).
 #
 # Usage:
-#   ./serverctl.sh start                    launch the server (background, silent)
+#   ./serverctl.sh start                    launch the server (background, silent);
+#                                           from a checkout, ./init_dev.sh first
 #   ./serverctl.sh status                   lifecycle phase + inference progress
 #   ./serverctl.sh wait                     poll status until phase is "ready"
 #   ./serverctl.sh settings                 current serving settings
@@ -36,6 +37,9 @@ case "$PORT" in
   '' | *[!0-9]*) PORT="$DEFAULT_PORT" ;;
 esac
 BASE="http://localhost:$PORT"
+
+# The daemon's own output, beside the worker log it writes itself.
+DAEMON_LOG="${CONFIG_PATH%/*}/junie-mlx-vlm-daemon.log"
 
 usage() {
   sed -n '/^# Usage:/,/^$/{s/^# \{0,1\}//p;}' "${BASH_SOURCE[0]}"
@@ -90,8 +94,9 @@ kv_to_json() {
 }
 
 # The one command that cannot be binary agnostic, because it has to know what
-# to run: a checkout has start_dev.sh, an unpacked tarball has the
-# junie-mlx-vlm binary either beside this script or on PATH.
+# to run. It is the same command either way -- an unpacked tarball has the
+# junie-mlx-vlm binary beside this script, a checkout has it in the venv that
+# init_dev.sh builds, and it may simply be on PATH.
 start_server() {
   if "${CURL[@]}" -o /dev/null -m 2 "$BASE/health" >/dev/null 2>&1; then
     echo "Already serving on port $PORT."
@@ -99,7 +104,9 @@ start_server() {
   fi
 
   server=""
-  for candidate in "$SCRIPT_DIR/start_dev.sh" "$SCRIPT_DIR/junie-mlx-vlm"; do
+  for candidate in \
+    "$SCRIPT_DIR/junie-mlx-vlm" \
+    "$SCRIPT_DIR/.venv/bin/junie-mlx-vlm"; do
     if [ -x "$candidate" ]; then
       server="$candidate"
       break
@@ -109,15 +116,23 @@ start_server() {
     server="$(command -v junie-mlx-vlm || true)"
   fi
   if [ -z "$server" ]; then
-    echo "ERROR: found neither $SCRIPT_DIR/start_dev.sh nor a junie-mlx-vlm" >&2
-    echo "       binary beside this script or on PATH." >&2
+    echo "ERROR: no junie-mlx-vlm beside this script, in ./.venv/bin or on" >&2
+    echo "       PATH. From a checkout, run ./init_dev.sh first." >&2
     exit 1
   fi
 
-  # Detached and quiet: the server outlives this shell and prints nothing
-  # here. start_dev.sh still writes mlx_server.log; the binary logs nowhere.
-  nohup "$server" >/dev/null 2>&1 &
-  echo "Started $(basename "$server") (pid $!); follow it with ./serverctl.sh wait"
+  # The daemon writes the worker's log itself; this is its own output --
+  # its startup lines, uvicorn's, and anything that dies before logging
+  # exists. Kept one run back, the same way the daemon keeps the worker's.
+  mkdir -p "$(dirname "$DAEMON_LOG")"
+  if [ -f "$DAEMON_LOG" ]; then
+    mv -f "$DAEMON_LOG" "$DAEMON_LOG.0"
+  fi
+
+  # Detached: the server outlives this shell, and says nothing here.
+  nohup "$server" >"$DAEMON_LOG" 2>&1 &
+  echo "Started $(basename "$server") (pid $!); logging to $DAEMON_LOG"
+  echo "Follow it with ./serverctl.sh wait"
 }
 
 wait_ready() {

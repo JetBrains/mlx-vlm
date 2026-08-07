@@ -29,24 +29,20 @@ Restart Junie after either changes.
 ## 3. Start
 
 ```bash
-./start_dev.sh
+./init_dev.sh          # once, and again when uv.lock changes
+./serverctl.sh start
 ```
 
-This is the development entrypoint: it runs the server from this checkout.
-Shipped machines run the frozen `junie-mlx-vlm` from
-`build_cli_tarball.sh`, which carries its own interpreter and needs none of
-the setup below.
+`init_dev.sh` only creates the Python virtualenv and installs dependencies
+(via `uv`, which is itself auto-installed and downloads Python 3.13 if the
+machine has none — the stock macOS `python3` is too old for `mlx>=0.32`).
+The project is installed editable, so the `junie-mlx-vlm` it puts in
+`./.venv/bin` runs this checkout's sources.
 
-Output goes to the screen **and** to `mlx_server.log` in the repo dir
-(gitignored, truncated on each start) — so after a problem you can always
-inspect or share the log of the last run.
-
-The script only:
-
-1. creates the Python virtualenv and installs dependencies (via `uv`,
-   which is itself auto-installed and downloads Python 3.13 if the machine
-   has none — the stock macOS `python3` is too old for `mlx>=0.32`), then
-2. starts the daemon, `python -m mlx_vlm_gateway`, with no arguments.
+`serverctl.sh start` is the entrypoint in both worlds: it runs that
+`junie-mlx-vlm` from a checkout, and the frozen one from
+`build_cli_tarball.sh` beside it on a shipped machine. It returns
+immediately and leaves the daemon running in the background.
 
 The daemon reads every setting from `server-config.json`, serves the public
 API on its `host`/`port` (`0.0.0.0:19239` by default), and spawns the
@@ -57,9 +53,7 @@ new sessions warm-start — is **currently disabled** pending rework. Point
 `seed_request` at a chat-completions request body to turn it back on for one
 machine; nothing does so by default.
 
-The first run is a fast no-op after step 1, so `./start_dev.sh` is also the
-everyday start command. `Ctrl-C` stops both processes and releases the model
-memory.
+Stop it with `./serverctl.sh stop`, which releases the model memory.
 
 Model weights and the Junie model descriptor are **not** installed by this
 script — see [Prerequisites](#2-prerequisites).
@@ -89,7 +83,8 @@ are fully KV-cached.)
 | Path | What |
 |---|---|
 | `<repo>/.venv/` | Python virtualenv (created on first run) |
-| `<repo>/mlx_server.log` | log of the current/last server run (gitignored) |
+| `~/.local/share/junie-local/junie-mlx-vlm-daemon.log` | the daemon's own output; previous run kept as `.log.0` |
+| `~/.local/share/junie-local/junie-mlx-vlm.log` | the inference worker's output, appended across restarts within a run; previous run kept as `.log.0` |
 | `~/.local/share/junie-local/server-config.json` | the only config: model, models dir, host/port, worker port, context, KV quantization, idle timeout, and worker launch settings (override its location with `JUNIE_SERVER_CONFIG`) |
 | `<repo>/research/junie.json` | the stable Junie prompt prefix (system message + tool schemas + first user message); used by `bench.sh`, and the request body `seed_request` expects — not loaded at startup while seeding is disabled |
 | `<repo>/research/junie-replay/` | captured session + replay script used by `bench.sh` |

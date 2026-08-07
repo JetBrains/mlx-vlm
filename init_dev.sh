@@ -1,28 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run the Junie local server from this checkout, for development.
+# Prepare this checkout to serve: create ./.venv and install the locked
+# dependencies. It starts nothing -- ./serverctl.sh start does that, for a
+# checkout and an unpacked tarball alike.
 #
-# It only prepares the Python environment and starts the daemon:
-#   1) python venv -> created at ./.venv on first run
-#   2) daemon      -> python -m mlx_vlm_gateway
+# Run it once, and again whenever uv.lock changes. The project is installed
+# editable, so ./.venv/bin/junie-mlx-vlm runs these sources, not a copy.
 #
-# The daemon takes no arguments: it reads every setting from the config
-# file (JUNIE_SERVER_CONFIG, default
-# ~/.local/share/junie-local/server-config.json), serves the public API,
-# and spawns the inference worker itself. Model weights and the Junie
-# model descriptor are installed separately.
-#
-# Shipped machines run the frozen `junie-mlx-vlm` from
-# build_cli_tarball.sh instead, which needs none of this: it carries its
-# own interpreter and dependencies.
+# Shipped machines need none of this: the frozen junie-mlx-vlm from
+# build_cli_tarball.sh carries its own interpreter and dependencies.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
-# Everything below goes both to the screen and to mlx_server.log in the
-# repo dir (gitignored; truncated on each start).
-exec > >(tee "$SCRIPT_DIR/mlx_server.log") 2>&1
 
 OS_NAME="$(uname -s)"
 ARCH_NAME="$(uname -m)"
@@ -33,7 +23,7 @@ if [ "$OS_NAME" != "Darwin" ] || [ "$ARCH_NAME" != "arm64" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1) Managed Python environment.
+# Managed Python environment.
 #
 # mlx>=0.32 ships wheels for CPython 3.10-3.14 only, while the stock
 # /usr/bin/python3 from the Xcode Command Line Tools is still 3.9 -- so the
@@ -81,11 +71,5 @@ fi
 echo "Syncing locked Python dependencies..."
 "$UV_BIN" sync --locked --python "$VENV_PYTHON_VERSION"
 
-# Make sure "import mlx_vlm" resolves to this checkout's sources, ahead of
-# any installed package.
-export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
-
-# ---------------------------------------------------------------------------
-# 2) Daemon.
-# ---------------------------------------------------------------------------
-exec "$VENV/bin/python" -m mlx_vlm_gateway
+echo
+echo "Ready. Start the server with:  ./serverctl.sh start"

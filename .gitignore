@@ -30,4 +30,3 @@ var/
 .vscode
 # JetBrains IDE
 .idea/
-mlx_server.log

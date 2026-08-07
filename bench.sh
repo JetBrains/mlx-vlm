@@ -14,7 +14,7 @@ if [ ! -x "$PYTHON_BIN" ]; then
   if command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN=python3
   else
-    echo "ERROR: Python environment is missing; run ./start_dev.sh first." >&2
+    echo "ERROR: Python environment is missing; run ./init_dev.sh first." >&2
     exit 1
   fi
 fi
@@ -42,7 +42,7 @@ PORT="${PORT:-$CONFIG_PORT}"
 
 if ! curl -sf -m 5 "http://localhost:$PORT/health" > /dev/null 2>&1; then
   echo "Server is not running on port $PORT."
-  echo "Start it first:  ./start_dev.sh"
+  echo "Start it first:  ./serverctl.sh start"
   exit 1
 fi
 
