@@ -2,10 +2,10 @@
 
 The public server is the lightweight gateway at `http://localhost:19239` by
 default. Its `host` and `port` come from `server-config.json`.
-The inference worker is private on `127.0.0.1:8086` and may be restarted or
-stopped without taking the gateway down.
+The gateway spawns the inference worker on the same `host` at `worker_port`
+(`19240` by default) and may restart or stop it without going down itself.
 The worker also watches its parent process and exits if the gateway crashes,
-so an orphan cannot keep model memory or port `8086` occupied.
+so an orphan cannot keep model memory or port `19240` occupied.
 
 Start both through the single supported entrypoint:
 

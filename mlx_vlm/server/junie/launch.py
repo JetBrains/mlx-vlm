@@ -1,19 +1,19 @@
 """Launch the server from the persistent config file.
 
-``python -m mlx_vlm.server.junie`` reads ``JUNIE_SERVER_CONFIG`` once and
-turns it into the stock server's inputs: the launch-time settings
-(host/port, prefill tuning, seed request, ...) become the equivalent
+``python -m mlx_vlm.server.junie`` takes no arguments. It reads the
+config file once (see :mod:`mlx_vlm_shared.server_settings`) and turns it
+into the stock server's inputs: the launch-time settings (host/worker
+port, prefill tuning, seed request, ...) become the equivalent
 ``mlx_vlm.server`` command line, and the runtime settings (model/drafter,
-context length, KV quantization, ...) are exported as env vars — so
-start.sh stays a dumb bootstrapper and every serving setting lives in one
-file.
+context length, KV quantization, ...) are exported as env vars — so every
+serving setting lives in one file.
 
-Extra command-line arguments are appended after the config-derived ones
-(argparse last-wins), so ad-hoc overrides still work:
-
-    python -m mlx_vlm.server.junie --log-level DEBUG
+Normally the daemon (``python -m mlx_vlm_gateway``) spawns this; it also
+exports the Hugging Face cache location, which has to be in place before
+this process imports anything.
 """
 
+import argparse
 import logging
 import os
 import re
@@ -22,7 +22,14 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from .config import DEFAULT_CONFIG, config_path, load_config
+from mlx_vlm_shared.server_settings import (
+    CONFIG_PATH_ENV,
+    DEFAULT_CONFIG,
+    DEFAULT_CONFIG_PATH,
+    config_path,
+    load_config,
+)
+
 from .parent_watchdog import start_parent_watchdog
 
 
@@ -75,6 +82,7 @@ def apply_config_to_env(cfg: dict) -> None:
         "KV_BITS",
         DEFAULT_KV_QUANT_BITS if cfg.get("kv_quantization") else None,
     )
+    set_or_unset("MLX_VLM_SOFT_REQUEST_TIMEOUT", cfg.get("soft_request_timeout"))
     # The gateway owns idle timing and stops the whole worker process.
     os.environ.pop("MLX_VLM_AUTO_UNLOAD_TIME", None)
 
@@ -114,15 +122,10 @@ def apply_inference_env(cfg: dict) -> None:
     set_or_unset("APC_ENABLED", "1" if cfg.get("apc_enabled") else "0")
     set_or_unset("APC_EXACT_SESSIONS", cfg.get("apc_exact_sessions"))
     set_or_unset("APC_SESSION_CHECKPOINTS", cfg.get("apc_session_checkpoints"))
-    disk_path = cfg.get("apc_disk_path")
-    if disk_path is None:
-        base = config_path()
-        disk_path = (
-            os.path.join(os.path.dirname(base), "apc-cache") if base else None
-        )
-    set_or_unset(
-        "APC_DISK_PATH", os.path.expanduser(disk_path) if disk_path else None
+    disk_path = cfg.get("apc_disk_path") or os.path.join(
+        os.path.dirname(config_path()), "apc-cache"
     )
+    set_or_unset("APC_DISK_PATH", os.path.expanduser(disk_path))
     set_or_unset("MLX_VLM_NGRAM_MAX", cfg.get("ngram_max"))
     # Always serialize request processing: the multi-request batching paths
     # are undertested with kv-bits, and Junie's traffic is sequential anyway.
@@ -132,10 +135,12 @@ def apply_inference_env(cfg: dict) -> None:
 
 def build_argv(cfg: dict) -> List[str]:
     argv = [
+        # Same host as the daemon; the worker's own port keeps the private
+        # inference API off the public one.
         "--host",
         str(cfg.get("host") or DEFAULT_CONFIG["host"]),
         "--port",
-        str(cfg.get("port") or DEFAULT_CONFIG["port"]),
+        str(cfg.get("worker_port") or DEFAULT_CONFIG["worker_port"]),
         "--prefill-step-size",
         str(cfg.get("prefill_step_size") or DEFAULT_CONFIG["prefill_step_size"]),
         # Quantize the KV cache from token 0 when kv_quantization is on
@@ -166,15 +171,18 @@ def build_argv(cfg: dict) -> List[str]:
 
 
 def main() -> None:
+    argparse.ArgumentParser(
+        description=(
+            "MLX-VLM inference worker. Takes no arguments; every setting "
+            f"comes from the config file (${CONFIG_PATH_ENV}, default "
+            f"{DEFAULT_CONFIG_PATH})."
+        )
+    ).parse_args()
     start_parent_watchdog()
     from ..cli import main as cli_main
 
     cfg = load_config()
-    if cfg is None:
-        # JUNIE_SERVER_CONFIG not set: fall back to stock flag behavior.
-        cli_main()
-        return
     initialize_from_config(cfg)
     apply_inference_env(cfg)
-    sys.argv = [sys.argv[0], *build_argv(cfg), *sys.argv[1:]]
+    sys.argv = [sys.argv[0], *build_argv(cfg)]
     cli_main()

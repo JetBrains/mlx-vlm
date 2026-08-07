@@ -1,13 +1,69 @@
 import json
+import os
+import sys
 
 import pytest
 
 import mlx_vlm_gateway.settings as settings_module
+from mlx_vlm_gateway.app import apply_model_cache_env, build_settings
 from mlx_vlm_gateway.settings import (
     DEFAULT_PUBLIC_SETTINGS,
     SettingsStore,
     SettingsValidationError,
 )
+from mlx_vlm_shared.server_settings import (
+    CONFIG_PATH_ENV,
+    DEFAULT_CONFIG,
+    DEFAULT_CONFIG_PATH,
+    config_path,
+)
+
+
+def test_config_path_defaults_to_the_shared_location(monkeypatch):
+    monkeypatch.delenv(CONFIG_PATH_ENV, raising=False)
+    assert config_path() == os.path.expanduser(DEFAULT_CONFIG_PATH)
+
+    monkeypatch.setenv(CONFIG_PATH_ENV, "~/elsewhere.json")
+    assert config_path() == os.path.expanduser("~/elsewhere.json")
+
+
+def test_daemon_settings_come_from_the_config(tmp_path):
+    path = str(tmp_path / "server-config.json")
+
+    settings = build_settings(path, {**DEFAULT_CONFIG, "host": "0.0.0.0"})
+
+    # A worker bound to 0.0.0.0 is reached over the loopback address.
+    assert settings.worker_url == f"http://127.0.0.1:{DEFAULT_CONFIG['worker_port']}"
+    assert settings.worker_command == (sys.executable, "-m", "mlx_vlm.server.junie")
+    assert settings.config_path == path
+
+
+def test_daemon_exports_the_configured_models_dir_to_the_worker(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_HUB_CACHE", "/some/other/cache")
+    # setenv-then-delenv so monkeypatch restores whatever was there.
+    monkeypatch.setenv("HF_HUB_OFFLINE", "restored-on-teardown")
+    monkeypatch.delenv("HF_HUB_OFFLINE")
+
+    apply_model_cache_env({**DEFAULT_CONFIG, "models_dir": str(tmp_path)})
+
+    # The worker inherits this environment when the daemon spawns it.
+    assert os.environ["HF_HUB_CACHE"] == str(tmp_path)
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+
+
+def test_daemon_keeps_an_explicit_online_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+
+    apply_model_cache_env({**DEFAULT_CONFIG, "models_dir": str(tmp_path)})
+
+    assert os.environ["HF_HUB_OFFLINE"] == "0"
+
+
+def test_daemon_refuses_a_worker_port_that_collides_with_the_public_one(tmp_path):
+    config = {**DEFAULT_CONFIG, "port": 19239, "worker_port": 19239}
+
+    with pytest.raises(SystemExit, match="must differ"):
+        build_settings(str(tmp_path / "server-config.json"), config)
 
 
 def test_gateway_creates_missing_config_with_defaults(tmp_path):

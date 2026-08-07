@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 import time
 from contextlib import asynccontextmanager
 from typing import Callable, Optional, Sequence
@@ -12,11 +13,26 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
+from mlx_vlm_shared.server_settings import (
+    CONFIG_PATH_ENV,
+    DEFAULT_CONFIG_PATH,
+    config_path,
+    load_config,
+)
+
 from .settings import RESTART_SETTING_KEYS, SettingsStore, SettingsValidationError
 from .supervisor import GatewaySettings, WorkerSupervisor
 
 
 logger = logging.getLogger("mlx_vlm.gateway")
+
+# The worker reads the same config file, so it needs no arguments either.
+WORKER_COMMAND = ("-m", "mlx_vlm.server.junie")
+
+
+def worker_connect_host(host: str) -> str:
+    """The address to reach a worker bound to ``host`` from this process."""
+    return "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
 
 
 def _proxy_response(response: httpx.Response) -> Response:
@@ -500,48 +516,54 @@ def create_app(
     return app
 
 
-def _parse_args(argv: Optional[Sequence[str]] = None):
-    parser = argparse.ArgumentParser(
-        description="MLX-VLM gateway and worker supervisor"
+def apply_model_cache_env(config: dict) -> None:
+    """Point the worker's Hugging Face cache at the configured models dir.
+
+    Applied to this process because the worker inherits its environment,
+    and it has to be: ``huggingface_hub`` reads both values once, when it
+    is imported, which happens before the worker's own code runs.
+    """
+    os.environ["HF_HUB_CACHE"] = os.path.expanduser(config["models_dir"])
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+
+def build_settings(path: str, config: dict) -> GatewaySettings:
+    """Turn the config file into the daemon's launch-time settings."""
+    if config["port"] == config["worker_port"]:
+        raise SystemExit(
+            f"ERROR: public port {config['port']} and worker port "
+            f"{config['worker_port']} must differ; fix {path}."
+        )
+    worker_host = worker_connect_host(config["host"])
+    return GatewaySettings(
+        worker_url=f"http://{worker_host}:{config['worker_port']}",
+        worker_command=(sys.executable, *WORKER_COMMAND),
+        config_path=path,
     )
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8085)
-    parser.add_argument("--worker-url", default="http://127.0.0.1:8086")
-    parser.add_argument("--startup-timeout", type=float, default=120.0)
-    parser.add_argument("--request-timeout", type=float, default=275.0)
-    parser.add_argument(
-        "--config",
-        default=os.environ.get("JUNIE_SERVER_CONFIG"),
-        help="Path to the persistent Junie server config JSON",
-    )
-    parser.add_argument("--log-level", default="INFO")
-    parser.add_argument("worker_command", nargs=argparse.REMAINDER)
-    args = parser.parse_args(argv)
-    if args.worker_command and args.worker_command[0] == "--":
-        args.worker_command = args.worker_command[1:]
-    if not args.worker_command:
-        parser.error("worker command is required after --")
-    return args
 
 
 def main(argv: Optional[Sequence[str]] = None):
-    args = _parse_args(argv)
+    argparse.ArgumentParser(
+        description=(
+            "MLX-VLM daemon: serves the public API and supervises the "
+            "inference worker. Takes no arguments; every setting comes from "
+            f"the config file (${CONFIG_PATH_ENV}, default "
+            f"{DEFAULT_CONFIG_PATH})."
+        )
+    ).parse_args(argv)
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
     )
-    settings = GatewaySettings(
-        worker_url=args.worker_url.rstrip("/"),
-        worker_command=tuple(args.worker_command),
-        startup_timeout_s=args.startup_timeout,
-        request_timeout_s=args.request_timeout,
-        config_path=args.config,
-    )
+    path = config_path()
+    config = load_config(path)
+    apply_model_cache_env(config)
+    logger.info("Config: %s (models: %s)", path, os.environ["HF_HUB_CACHE"])
     uvicorn.run(
-        create_app(settings),
-        host=args.host,
-        port=args.port,
+        create_app(build_settings(path, config)),
+        host=config["host"],
+        port=config["port"],
         workers=1,
         server_header=False,
-        log_level=args.log_level.lower(),
+        log_level="info",
     )

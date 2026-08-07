@@ -12,7 +12,22 @@ git clone -b local/serving-patches https://github.com/erokhins/mlx-vlm
 cd mlx-vlm
 ```
 
-## 2. Start (installs everything on first run)
+## 2. Prerequisites
+
+Installed separately (by the packaged installer):
+
+- model weights in the configured `models_dir`
+  (`~/.local/share/junie-local/models/` by default), in HF-hub layout
+  (`models--mlx-community--Qwen3.6-27B-4bit` and `...-MTP-4bit`, ~17 GB) —
+  the worker loads them from there by repo id, offline;
+- `~/.junie/models/local-qwen3.6-27b-4bit-vlm.json`, the Junie model
+  descriptor pointing at `http://localhost:19239/v1/chat/completions`, and
+  `modelForLaunch` in `~/.junie/settings.json` set to
+  `custom:local-qwen3.6-27b-4bit-vlm`.
+
+Restart Junie after either changes.
+
+## 3. Start
 
 ```bash
 ./start.sh
@@ -22,28 +37,27 @@ Output goes to the screen **and** to `mlx_server.log` in the repo dir
 (gitignored, truncated on each start) — so after a problem you can always
 inspect or share the log of the last run.
 
-The first run takes a while; it automatically:
+The script only:
 
-1. downloads the model weights (~17 GB, SHA256-verified, resumable — just
-   re-run the script if interrupted),
-2. writes the Junie model descriptor and sets it as Junie's default model,
-3. creates the Python virtualenv and installs dependencies (via `uv`,
+1. creates the Python virtualenv and installs dependencies (via `uv`,
    which is itself auto-installed and downloads Python 3.13 if the machine
-   has none — the stock macOS `python3` is too old for `mlx>=0.32`),
-4. starts the lightweight API gateway on port 8085 and its inference worker
-   on local-only port 8086, then prefills + pins the shared Junie prompt prefix
-   (~12 s; later restarts restore it from disk in ~0.5 s — look for
-   `Seed prefix warmed and pinned` in the log).
+   has none — the stock macOS `python3` is too old for `mlx>=0.32`), then
+2. starts the daemon, `python -m mlx_vlm_gateway`, with no arguments.
 
-Every later run skips 1–3 automatically (the descriptor/default are just
-rewritten), so `./start.sh` is also the everyday start command. `Ctrl-C`
-stops both processes and releases the model memory.
+The daemon reads every setting from `server-config.json`, serves the public
+API on its `host`/`port` (`0.0.0.0:19239` by default), and spawns the
+inference worker itself on `worker_port` (`19240`). The worker then prefills
++ pins the shared Junie prompt prefix (~12 s; later restarts restore it from
+disk in ~0.5 s — look for `Seed prefix warmed and pinned` in the log).
 
-Then restart Junie — it will use the local model by default. (If
-`~/.junie/settings.json` didn't exist yet, start Junie once and re-run
-`./start.sh`, or pick `mlx-community/Qwen3.6-27B-4bit` manually.)
+The first run is a fast no-op after step 1, so `./start.sh` is also the
+everyday start command. `Ctrl-C` stops both processes and releases the model
+memory.
 
-## 3. Benchmark (optional)
+Model weights and the Junie model descriptor are **not** installed by this
+script — see [Prerequisites](#2-prerequisites).
+
+## 4. Benchmark (optional)
 
 With the server running:
 
@@ -69,29 +83,28 @@ are fully KV-cached.)
 |---|---|
 | `<repo>/.venv/` | Python virtualenv (created on first run) |
 | `<repo>/mlx_server.log` | log of the current/last server run (gitignored) |
-| `~/.local/share/junie-local/server-config.json` | persistent model, context, KV quantization, idle timeout, and worker launch settings |
+| `~/.local/share/junie-local/server-config.json` | the only config: model, models dir, host/port, worker port, context, KV quantization, idle timeout, and worker launch settings (override its location with `JUNIE_SERVER_CONFIG`) |
 | `<repo>/research/junie.json` | seed request: the stable Junie prompt prefix (system message + tool schemas + first user message), prefilled and pinned at startup |
 | `<repo>/research/junie-replay/` | captured session + replay script used by `bench.sh` |
-| `~/.local/share/junie-local/models/` | model weights, HF-hub layout (`models--mlx-community--Qwen3.6-27B-4bit`, `...-MTP-4bit`, plus `.models--*.installed` completion markers) |
-| `~/.local/share/junie-local/incomplete_downloads/` | in-progress downloads (kept for resume, removed when done) |
+| `~/.local/share/junie-local/models/` | model weights, HF-hub layout (`models--mlx-community--Qwen3.6-27B-4bit`, `...-MTP-4bit`); installed separately, relocatable via the `models_dir` setting |
 | `~/.local/share/junie-local/apc-cache/` | APC disk tier — holds only the pinned seed snapshot (~1 GB) so it survives restarts |
 | `<repo>/.uv/bin/uv` | `uv` binary (only when not already installed on the machine) |
 | `<repo>/.uv/python/` | uv-managed CPython 3.13 (only when the machine has no suitable Python) |
-| `~/.junie/models/local-qwen3.6-27b-4bit-vlm.json` | Junie model descriptor pointing at this server |
-| `~/.junie/settings.json` | existing Junie settings; `modelForLaunch` is set to this model |
+| `~/.junie/models/local-qwen3.6-27b-4bit-vlm.json` | Junie model descriptor pointing at this server; installed separately |
+| `~/.junie/settings.json` | existing Junie settings; `modelForLaunch` points at this model |
 
 ## Server endpoints
 
 | URL | What |
 |---|---|
-| `http://localhost:8085/v1/chat/completions` | OpenAI-compatible chat endpoint (this is what Junie calls); responses include a `timings` block with prefill/decode speeds and speculative-acceptance counters |
-| `http://localhost:8085/status` | lifecycle, loaded-model state, and active-request count |
-| `http://localhost:8085/current_settings` | persistent Junie serving settings |
-| `POST http://localhost:8085/apply_settings` | apply settings; restart the worker when required |
-| `POST http://localhost:8085/shutdown` | stop the worker and gateway and release model memory |
-| `http://localhost:8085/health` | cheap gateway liveness, even while the worker is stopped |
-| `http://localhost:8085/metrics` | inference metrics plus gateway process state |
-| `http://localhost:8085/cache/stats` | prompt/KV cache statistics |
+| `http://localhost:19239/v1/chat/completions` | OpenAI-compatible chat endpoint (this is what Junie calls); responses include a `timings` block with prefill/decode speeds and speculative-acceptance counters |
+| `http://localhost:19239/status` | lifecycle, loaded-model state, and active-request count |
+| `http://localhost:19239/current_settings` | persistent Junie serving settings |
+| `POST http://localhost:19239/apply_settings` | apply settings; restart the worker when required |
+| `POST http://localhost:19239/shutdown` | stop the worker and gateway and release model memory |
+| `http://localhost:19239/health` | cheap gateway liveness, even while the worker is stopped |
+| `http://localhost:19239/metrics` | inference metrics plus gateway process state |
+| `http://localhost:19239/cache/stats` | prompt/KV cache statistics |
 
 The gateway stays available if MLX or the worker process crashes. It returns
 `503` for the interrupted request and starts a fresh worker. A manual
@@ -120,10 +133,10 @@ model to become ready, and then forwards that original request. The only
 supported process entrypoint remains `./start.sh`.
 
 Chat requests are batch-only; an incoming `stream: true` is changed to
-`false`. At 270 seconds the worker cancels only that generation and returns
-the partial answer when one exists, or `504` when it produced nothing. If the
-worker cannot stop it by the 275-second hard limit, the gateway restarts the
-worker. Two consecutive worker `500` responses also trigger a restart;
+`false`. At `soft_request_timeout` seconds (270 by default) the worker cancels
+only that generation and returns the partial answer when one exists, or `504`
+when it produced nothing. If the worker cannot stop it by the daemon's
+275-second hard limit, the daemon restarts the worker. Two consecutive worker `500` responses also trigger a restart;
 client errors such as `400` and `422` do not.
 
 ## What to expect in the log
@@ -139,8 +152,8 @@ client errors such as `400` and `422` do not.
 
 ## Tuning knobs (already set to measured optima)
 
-All optional; see `start.sh` comments and `research/mtp-overhead/README.md`
-for the measurements behind the defaults:
+All optional; see `research/mtp-overhead/README.md` for the measurements
+behind the defaults:
 
 - `MLX_VLM_NGRAM_*` — n-gram prompt-lookup drafting (base window 4,
   full-accept doubling to 32; `MLX_VLM_NGRAM_DRAFT=0` disables).

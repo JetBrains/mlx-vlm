@@ -3,8 +3,13 @@ import json
 import os
 
 from mlx_vlm.server import _app_module as server_app
-from mlx_vlm.server.junie import config, launch
-from mlx_vlm_shared.server_settings import normalize_config
+from mlx_vlm.server.junie import launch
+from mlx_vlm_shared.server_settings import (
+    CONFIG_PATH_ENV,
+    DEFAULT_CONFIG,
+    load_config,
+    normalize_config,
+)
 
 
 def test_config_file_drives_model_preload(monkeypatch, tmp_path):
@@ -18,13 +23,13 @@ def test_config_file_drives_model_preload(monkeypatch, tmp_path):
             }
         )
     )
-    monkeypatch.setenv(config.CONFIG_PATH_ENV, str(path))
+    monkeypatch.setenv(CONFIG_PATH_ENV, str(path))
     monkeypatch.delenv("MLX_VLM_PRELOAD_MODEL", raising=False)
 
     # The launcher (python -m mlx_vlm.server.junie) exports the runtime
     # settings to the env before the server starts; the stock lifespan
     # preload picks them up from there.
-    launch.initialize_from_config(config.load_config())
+    launch.initialize_from_config(load_config())
     assert os.environ["MLX_VLM_PRELOAD_MODEL"] == "test-model"
 
     calls = []
@@ -47,9 +52,11 @@ def test_config_file_drives_model_preload(monkeypatch, tmp_path):
 
 def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
     cfg = {
-        **config.DEFAULT_CONFIG,
+        **DEFAULT_CONFIG,
         "host": "0.0.0.0",
+        # The worker serves "worker_port"; "port" belongs to the daemon.
         "port": 12345,
+        "worker_port": 12346,
         "prefill_step_size": 2048,
         "seed_request": "",
         "int8_prefill": False,
@@ -67,7 +74,7 @@ def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
         "--host",
         "0.0.0.0",
         "--port",
-        "12345",
+        "12346",
         "--prefill-step-size",
         "2048",
         "--quantized-kv-start",
@@ -84,30 +91,41 @@ def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
 def test_pre_m5_mac_uses_standard_prefill(monkeypatch):
     monkeypatch.setattr(launch, "_apple_chip_generation", lambda: 4)
 
-    assert "--int8-prefill" not in launch.build_argv(config.DEFAULT_CONFIG)
+    assert "--int8-prefill" not in launch.build_argv(DEFAULT_CONFIG)
 
 
 def test_m5_mac_uses_int8_prefill(monkeypatch):
     monkeypatch.setattr(launch, "_apple_chip_generation", lambda: 5)
 
-    assert "--int8-prefill" in launch.build_argv(config.DEFAULT_CONFIG)
+    assert "--int8-prefill" in launch.build_argv(DEFAULT_CONFIG)
 
 
 def test_gateway_owns_auto_unload(monkeypatch):
     monkeypatch.setenv("MLX_VLM_AUTO_UNLOAD_TIME", "60")
 
-    launch.apply_config_to_env(config.DEFAULT_CONFIG)
+    launch.apply_config_to_env(DEFAULT_CONFIG)
 
     assert "MLX_VLM_AUTO_UNLOAD_TIME" not in os.environ
 
 
+def test_soft_request_timeout_comes_from_the_config(monkeypatch):
+    monkeypatch.setenv("MLX_VLM_SOFT_REQUEST_TIMEOUT", "9999")
+
+    launch.apply_config_to_env({**DEFAULT_CONFIG, "soft_request_timeout": 42})
+    assert os.environ["MLX_VLM_SOFT_REQUEST_TIMEOUT"] == "42"
+
+    # null disables the soft stop, leaving only the daemon's hard limit.
+    launch.apply_config_to_env({**DEFAULT_CONFIG, "soft_request_timeout": None})
+    assert "MLX_VLM_SOFT_REQUEST_TIMEOUT" not in os.environ
+
+
 def test_missing_worker_config_uses_defaults_without_writing(monkeypatch, tmp_path):
     path = tmp_path / "server-config.json"
-    monkeypatch.setenv(config.CONFIG_PATH_ENV, str(path))
+    monkeypatch.setenv(CONFIG_PATH_ENV, str(path))
 
-    loaded = config.load_config()
+    loaded = load_config()
 
-    assert loaded == config.DEFAULT_CONFIG
+    assert loaded == DEFAULT_CONFIG
     assert not path.exists()
 
 
@@ -121,13 +139,13 @@ def test_invalid_worker_config_is_normalized_without_writing(
         "kv_quantization": "yes",
     }
     path.write_text(json.dumps(original))
-    monkeypatch.setenv(config.CONFIG_PATH_ENV, str(path))
+    monkeypatch.setenv(CONFIG_PATH_ENV, str(path))
 
-    loaded = config.load_config()
+    loaded = load_config()
 
     assert loaded["model_name"] == "test-model"
-    assert loaded["auto_unload_time"] == config.DEFAULT_CONFIG["auto_unload_time"]
-    assert loaded["kv_quantization"] is config.DEFAULT_CONFIG["kv_quantization"]
+    assert loaded["auto_unload_time"] == DEFAULT_CONFIG["auto_unload_time"]
+    assert loaded["kv_quantization"] is DEFAULT_CONFIG["kv_quantization"]
     assert json.loads(path.read_text()) == original
     assert [item.name for item in tmp_path.iterdir()] == ["server-config.json"]
 

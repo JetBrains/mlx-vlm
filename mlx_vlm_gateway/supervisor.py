@@ -8,6 +8,8 @@ from typing import Optional
 
 import httpx
 
+from mlx_vlm_shared.server_settings import CONFIG_PATH_ENV
+
 
 logger = logging.getLogger("mlx_vlm.gateway")
 GATEWAY_PID_ENV = "MLX_VLM_GATEWAY_PID"
@@ -15,9 +17,12 @@ GATEWAY_PID_ENV = "MLX_VLM_GATEWAY_PID"
 
 @dataclass(frozen=True)
 class GatewaySettings:
-    worker_url: str = "http://127.0.0.1:8086"
+    worker_url: str = "http://127.0.0.1:19240"
     worker_command: tuple[str, ...] = ()
     startup_timeout_s: float = 120.0
+    # Hard limit for a worker that cannot acknowledge cancellation; the
+    # worker's own softer limit comes from "soft_request_timeout" in the
+    # config file.
     request_timeout_s: float = 275.0
     startup_probe_interval_s: float = 1.0
     probe_interval_s: float = 5.0
@@ -181,6 +186,10 @@ class WorkerSupervisor:
         kwargs = {}
         worker_env = os.environ.copy()
         worker_env[GATEWAY_PID_ENV] = str(os.getpid())
+        # Every other setting the worker needs is in the config file it
+        # reads for itself.
+        if self.settings.config_path:
+            worker_env[CONFIG_PATH_ENV] = self.settings.config_path
         kwargs["env"] = worker_env
         if os.name != "nt":
             kwargs["start_new_session"] = True
