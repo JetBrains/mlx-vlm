@@ -1,6 +1,8 @@
 import asyncio
 import json
+import logging
 import os
+import sys
 
 from mlx_vlm.server import _app_module as server_app
 from mlx_vlm.server.junie import launch
@@ -86,6 +88,27 @@ def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
     assert os.environ["APC_DISK_PATH"] == str(tmp_path / "cache")
     assert os.environ["MLX_VLM_NGRAM_MAX"] == "6"
     assert os.environ["MLX_VLM_MAX_CONCURRENT_REQUESTS"] == "1"
+
+
+def test_launcher_logs_the_config_it_resolved(monkeypatch, capsys):
+    import mlx_vlm.server.cli as server_cli
+
+    # The worker starts with no root handler, and basicConfig does nothing
+    # once one exists — so clear whatever the test session installed.
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    monkeypatch.setattr(sys, "argv", ["junie-mlx-vlm"])
+    monkeypatch.setattr(launch, "start_parent_watchdog", lambda: None)
+    monkeypatch.setattr(
+        launch, "load_config", lambda: {**DEFAULT_CONFIG, "model_name": "demo-model"}
+    )
+    monkeypatch.setattr(launch, "apply_inference_env", lambda cfg: None)
+    monkeypatch.setattr(server_cli, "main", lambda: None)
+
+    launch.main()
+
+    # cli.main configures logging as well, but only once argparse has run —
+    # by then this record is already gone unless the launcher got there first.
+    assert "model=demo-model" in capsys.readouterr().err
 
 
 def test_seed_prefill_is_off_unless_a_request_is_configured(tmp_path):

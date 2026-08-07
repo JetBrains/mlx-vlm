@@ -35,6 +35,20 @@ from .parent_watchdog import start_parent_watchdog
 logger = logging.getLogger("mlx_vlm.server")
 
 DEFAULT_KV_QUANT_BITS = 8
+# Must match mlx_vlm.server.cli, whose own basicConfig call is a no-op once
+# this module has installed a root handler.
+LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
+
+
+def configure_logging() -> None:
+    """Install the root log handler before anything here writes a record.
+
+    ``mlx_vlm.server.cli`` configures logging too, but only after argparse
+    has run — by which point the launcher has already reported the config
+    it resolved, and with no handler installed those INFO records go to
+    Python's last-resort handler, which drops anything below WARNING.
+    """
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 
 
 def _apple_chip_generation() -> Optional[int]:
@@ -171,6 +185,7 @@ def main() -> None:
             f"{DEFAULT_CONFIG_PATH})."
         )
     ).parse_args()
+    configure_logging()
     start_parent_watchdog()
     from ..cli import main as cli_main
 
