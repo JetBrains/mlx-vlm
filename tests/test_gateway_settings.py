@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 
 import pytest
 
@@ -11,6 +10,7 @@ from mlx_vlm_gateway.settings import (
     SettingsStore,
     SettingsValidationError,
 )
+from mlx_vlm_gateway.supervisor import worker_command
 from mlx_vlm_shared.server_settings import (
     CONFIG_PATH_ENV,
     DEFAULT_CONFIG,
@@ -34,7 +34,7 @@ def test_daemon_settings_come_from_the_config(tmp_path):
 
     # A worker bound to 0.0.0.0 is reached over the loopback address.
     assert settings.worker_url == f"http://127.0.0.1:{DEFAULT_CONFIG['worker_port']}"
-    assert settings.worker_command == (sys.executable, "-m", "mlx_vlm.server.junie")
+    assert settings.worker_command == worker_command()
     assert settings.config_path == path
 
 

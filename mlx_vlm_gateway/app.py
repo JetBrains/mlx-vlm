@@ -3,7 +3,6 @@ import asyncio
 import logging
 import os
 import signal
-import sys
 import time
 from contextlib import asynccontextmanager
 from typing import Callable, Optional, Sequence
@@ -21,13 +20,10 @@ from mlx_vlm_shared.server_settings import (
 )
 
 from .settings import RESTART_SETTING_KEYS, SettingsStore, SettingsValidationError
-from .supervisor import GatewaySettings, WorkerSupervisor
+from .supervisor import GatewaySettings, WorkerSupervisor, worker_command
 
 
 logger = logging.getLogger("mlx_vlm.gateway")
-
-# The worker reads the same config file, so it needs no arguments either.
-WORKER_COMMAND = ("-m", "mlx_vlm.server.junie")
 
 
 def worker_connect_host(host: str) -> str:
@@ -537,7 +533,7 @@ def build_settings(path: str, config: dict) -> GatewaySettings:
     worker_host = worker_connect_host(config["host"])
     return GatewaySettings(
         worker_url=f"http://{worker_host}:{config['worker_port']}",
-        worker_command=(sys.executable, *WORKER_COMMAND),
+        worker_command=worker_command(),
         config_path=path,
     )
 

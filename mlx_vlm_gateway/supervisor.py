@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -13,6 +14,27 @@ from mlx_vlm_shared.server_settings import CONFIG_PATH_ENV
 
 logger = logging.getLogger("mlx_vlm.gateway")
 GATEWAY_PID_ENV = "MLX_VLM_GATEWAY_PID"
+
+DAEMON_SUBCOMMAND = "daemon"
+WORKER_SUBCOMMAND = "worker"
+# The dispatcher's dotted path. It cannot report its own importable name:
+# both PyInstaller and "-m" run it as __main__. Kept here rather than in
+# cli.py so that nothing imports the dispatcher, which would give the
+# "-m" run two copies of it.
+CLI_MODULE = "mlx_vlm_gateway.cli"
+
+
+def worker_command() -> tuple[str, ...]:
+    """The command line that starts the inference worker.
+
+    Frozen (build_cli_tarball.sh) there is a single executable and
+    ``sys.executable`` is it, so the worker is this same program with the
+    "worker" subcommand. From a checkout that subcommand is reached
+    through ``-m`` instead, on a real interpreter.
+    """
+    if getattr(sys, "frozen", False):
+        return (sys.executable, WORKER_SUBCOMMAND)
+    return (sys.executable, "-m", CLI_MODULE, WORKER_SUBCOMMAND)
 
 
 @dataclass(frozen=True)
