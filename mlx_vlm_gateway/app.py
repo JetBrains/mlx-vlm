@@ -596,6 +596,17 @@ def build_settings(path: str, config: dict) -> GatewaySettings:
         worker_command=worker_command(),
         worker_log_path=worker_log_path(path),
         config_path=path,
+        startup_timeout_s=config["startup_timeout_s"],
+        request_timeout_s=config["request_timeout_s"],
+        startup_probe_interval_s=config["startup_probe_interval_s"],
+        probe_interval_s=config["probe_interval_s"],
+        probe_timeout_s=config["probe_timeout_s"],
+        probe_failures_before_restart=config["probe_failures_before_restart"],
+        max_start_failures=config["max_start_failures"],
+        startup_retry_cooldown_s=config["startup_retry_cooldown_s"],
+        restart_delay_s=config["restart_delay_s"],
+        shutdown_timeout_s=config["shutdown_timeout_s"],
+        idle_check_interval_s=config["idle_check_interval_s"],
     )
 
 

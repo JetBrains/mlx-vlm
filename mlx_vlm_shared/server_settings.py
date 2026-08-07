@@ -79,6 +79,22 @@ DEFAULT_CONFIG = {
     "apc_session_checkpoints": 15,
     "apc_disk_path": None,
     "ngram_max": 8,
+    # Daemon-side supervisor tuning: how long to wait for the worker to
+    # start, how long a single proxied request may run before the daemon
+    # gives up and restarts the worker, and the health-probe cadence. Keep
+    # "request_timeout_s" above "soft_request_timeout" above, since that is
+    # the worker's own softer per-request limit that should fire first.
+    "startup_timeout_s": 120.0,
+    "request_timeout_s": 275.0,
+    "startup_probe_interval_s": 1.0,
+    "probe_interval_s": 5.0,
+    "probe_timeout_s": 2.0,
+    "probe_failures_before_restart": 3,
+    "max_start_failures": 3,
+    "startup_retry_cooldown_s": 30.0,
+    "restart_delay_s": 2.0,
+    "shutdown_timeout_s": 5.0,
+    "idle_check_interval_s": 1.0,
 }
 
 DEFAULT_PUBLIC_SETTINGS = {key: DEFAULT_CONFIG[key] for key in PUBLIC_SETTING_KEYS}
@@ -100,6 +116,14 @@ def _is_int_in(low, high):
         )
 
     return check
+
+
+def _is_positive_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def _is_positive_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 _VALIDATORS = {
@@ -128,6 +152,17 @@ _VALIDATORS = {
     "apc_session_checkpoints": _is_int_in(1, 64),
     "apc_disk_path": lambda value: value is None or isinstance(value, str),
     "ngram_max": _is_int_in(1, 1024),
+    "startup_timeout_s": _is_positive_number,
+    "request_timeout_s": _is_positive_number,
+    "startup_probe_interval_s": _is_positive_number,
+    "probe_interval_s": _is_positive_number,
+    "probe_timeout_s": _is_positive_number,
+    "probe_failures_before_restart": _is_positive_int,
+    "max_start_failures": _is_positive_int,
+    "startup_retry_cooldown_s": _is_positive_number,
+    "restart_delay_s": _is_positive_number,
+    "shutdown_timeout_s": _is_positive_number,
+    "idle_check_interval_s": _is_positive_number,
 }
 
 

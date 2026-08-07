@@ -10,7 +10,7 @@ from typing import Optional
 
 import httpx
 
-from mlx_vlm_shared.server_settings import CONFIG_PATH_ENV
+from mlx_vlm_shared.server_settings import CONFIG_PATH_ENV, DEFAULT_CONFIG
 
 
 logger = logging.getLogger("mlx_vlm.gateway")
@@ -45,20 +45,25 @@ class GatewaySettings:
     # File the worker's stdout and stderr go to; None leaves it inheriting
     # this process's, which is what a checkout wants.
     worker_log_path: Optional[str] = None
-    startup_timeout_s: float = 120.0
+    # Defaults for all fields below come from DEFAULT_CONFIG, the single
+    # source of truth for these numbers; build_settings() in app.py passes
+    # the (possibly config-file-overridden) values through explicitly, so
+    # these only take effect for callers that construct GatewaySettings
+    # directly, e.g. tests.
+    startup_timeout_s: float = DEFAULT_CONFIG["startup_timeout_s"]
     # Hard limit for a worker that cannot acknowledge cancellation; the
     # worker's own softer limit comes from "soft_request_timeout" in the
     # config file.
-    request_timeout_s: float = 275.0
-    startup_probe_interval_s: float = 1.0
-    probe_interval_s: float = 5.0
-    probe_timeout_s: float = 2.0
-    probe_failures_before_restart: int = 3
-    max_start_failures: int = 3
-    startup_retry_cooldown_s: float = 30.0
-    restart_delay_s: float = 2.0
-    shutdown_timeout_s: float = 5.0
-    idle_check_interval_s: float = 1.0
+    request_timeout_s: float = DEFAULT_CONFIG["request_timeout_s"]
+    startup_probe_interval_s: float = DEFAULT_CONFIG["startup_probe_interval_s"]
+    probe_interval_s: float = DEFAULT_CONFIG["probe_interval_s"]
+    probe_timeout_s: float = DEFAULT_CONFIG["probe_timeout_s"]
+    probe_failures_before_restart: int = DEFAULT_CONFIG["probe_failures_before_restart"]
+    max_start_failures: int = DEFAULT_CONFIG["max_start_failures"]
+    startup_retry_cooldown_s: float = DEFAULT_CONFIG["startup_retry_cooldown_s"]
+    restart_delay_s: float = DEFAULT_CONFIG["restart_delay_s"]
+    shutdown_timeout_s: float = DEFAULT_CONFIG["shutdown_timeout_s"]
+    idle_check_interval_s: float = DEFAULT_CONFIG["idle_check_interval_s"]
     config_path: Optional[str] = None
 
 
