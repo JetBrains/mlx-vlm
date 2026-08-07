@@ -23,6 +23,13 @@ The gateway always forwards it as a non-streaming request. If the worker was
 stopped by the idle timeout, the gateway starts it, waits until it is ready,
 and then forwards the same request.
 
+Corrupted-generation bandage: if the model emits a long run of token id 0
+("!", the argmax of zeroed/NaN logits — the signature of corrupted serving
+state), the worker fails the request with HTTP 508 (a private
+worker-to-gateway signal, tunable via `MLX_VLM_MAX_ZERO_TOKEN_RUN`,
+default 8, 0 disables). The gateway maps it to a 503 for the client and
+restarts the worker process, so a retry lands on a freshly loaded model.
+
 ## Status
 
 `GET /status` reports gateway-owned lifecycle and request state:

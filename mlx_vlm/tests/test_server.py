@@ -648,6 +648,77 @@ def _unstarted_response_generator():
     return gen
 
 
+def test_zero_token_run_fails_request_with_corruption_error(monkeypatch):
+    """A run of token id 0 fails the request with CorruptedGenerationError
+    and drops it from the batch (the endpoint maps it to HTTP 508)."""
+    monkeypatch.setenv("MLX_VLM_MAX_ZERO_TOKEN_RUN", "3")
+
+    class FakeDetokenizer:
+        def __init__(self):
+            self.last_segment = "!"
+
+        def add_token(self, token):
+            self.last_segment = "!"
+
+        def finalize(self):
+            pass
+
+    class FakeBatchGenerator:
+        def __init__(self):
+            self.unprocessed_prompts = []
+            self.has_pending_prompts = False
+            self.removed = []
+
+        def next(self, **kwargs):
+            return [], [
+                SimpleNamespace(
+                    uid=1,
+                    token=0,
+                    token_logprob=0.0,
+                    finish_reason=None,
+                )
+            ]
+
+        def remove(self, uid):
+            self.removed.append(uid)
+
+    gen = _unstarted_response_generator()
+    gen._raw_token_log = False
+    rqueue = Queue()
+    active = {
+        1: {
+            "rqueue": rqueue,
+            "streamer": _ServerTokenStreamer(SimpleNamespace(), FakeDetokenizer()),
+            "request_id": "corrupt-test",
+            "queued_at": 0.0,
+            "prompt_tokens": 4,
+            "prefill_started_at": 0.0,
+            "prefill_processed": 4,
+            "generated_tokens": 0,
+            "decode_started_at": None,
+            "last_token_at": None,
+        }
+    }
+
+    batch_gen = FakeBatchGenerator()
+    for _ in range(3):
+        gen._step(batch_gen, active)
+
+    # Two zero-tokens streamed, the third crosses the threshold.
+    items = []
+    while not rqueue.empty():
+        items.append(rqueue.get_nowait())
+    errors = [
+        i
+        for i in items
+        if isinstance(i, server_generation.CorruptedGenerationError)
+    ]
+    assert errors, f"expected CorruptedGenerationError in {items!r}"
+    assert items[-1] is None  # stream terminated
+    assert batch_gen.removed == [1]
+    assert 1 not in active
+
+
 def test_collect_pending_requests_respects_max_items():
     """max_items caps admission; the rest stay queued (serial mode)."""
     gen = _unstarted_response_generator()
@@ -2494,6 +2565,39 @@ def test_v1_non_stream_endpoints_reject_over_context(
 
     assert response.status_code == 400
     assert "MAX_KV_SIZE is 8" in response.json()["detail"]
+
+
+def test_chat_completions_maps_corrupted_generation_to_508(client, monkeypatch):
+    class CorruptedResponseGenerator:
+        def generate(self, *args, **kwargs):
+            raise server.CorruptedGenerationError(
+                "request corrupt-test emitted 8 consecutive token id 0"
+            )
+
+    model = SimpleNamespace()
+    processor = SimpleNamespace()
+    config = SimpleNamespace(model_type="qwen2_vl")
+
+    monkeypatch.setattr(server.runtime, "metrics", server.ServerMetricsStore())
+    monkeypatch.setattr(
+        server.runtime, "response_generator", CorruptedResponseGenerator()
+    )
+    monkeypatch.setattr(
+        server, "get_cached_model", MagicMock(return_value=(model, processor, config))
+    )
+    monkeypatch.setattr(server, "apply_chat_template", MagicMock(return_value="prompt"))
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "demo",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 4,
+        },
+    )
+
+    assert response.status_code == 508
+    assert "corrupted output" in response.json()["detail"]
 
 
 def test_chat_completions_endpoint_forwards_explicit_sampling_args(client):

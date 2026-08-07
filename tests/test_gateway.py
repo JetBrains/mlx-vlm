@@ -552,6 +552,29 @@ def test_second_consecutive_500_restarts_worker(monkeypatch):
         _wait_until(lambda: len(processes) == 2)
 
 
+def test_worker_508_returns_503_and_restarts_worker(monkeypatch):
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(
+                508, json={"detail": "corrupted generation"}
+            )
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler)
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/ready").status_code == 200)
+        assert len(processes) == 1
+
+        response = client.post("/v1/chat/completions", json={})
+
+        # A single 508 is enough: 503 to the client, fresh worker process.
+        assert response.status_code == 503
+        assert "restarting" in response.json()["detail"]
+        _wait_until(lambda: len(processes) == 2)
+
+
 def test_old_worker_responses_do_not_affect_new_worker(monkeypatch):
     def handler(request):
         if request.url.path == "/ready":

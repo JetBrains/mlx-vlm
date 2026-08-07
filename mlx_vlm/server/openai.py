@@ -29,6 +29,7 @@ from ..prompt_utils import apply_chat_template, extract_text_from_content
 from ..tool_parsers import _infer_tool_parser_from_processor, load_tool_module
 from ..utils import prepare_inputs
 from .generation import (
+    CorruptedGenerationError,
     GenerationMetrics,
     PromptTooLongError,
     _build_metrics_envelope,
@@ -2455,6 +2456,25 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                 mx.clear_cache()
                 gc.collect()
                 raise HTTPException(status_code=400, detail=str(e))
+            except CorruptedGenerationError as e:
+                runtime.metrics.record_failure(
+                    endpoint="/chat/completions",
+                    model=request.model,
+                    stream=False,
+                    error=f"corrupted_generation: {e}",
+                )
+                mx.clear_cache()
+                gc.collect()
+                # 508 Loop Detected: the private signal to the gateway that
+                # serving state is corrupted; it restarts this worker and
+                # returns 503 to its client.
+                raise HTTPException(
+                    status_code=508,
+                    detail=(
+                        "Generation produced corrupted output (token-id-0 "
+                        "loop); the worker needs a restart."
+                    ),
+                )
             except Exception as e:
                 runtime.metrics.record_failure(
                     endpoint="/chat/completions",

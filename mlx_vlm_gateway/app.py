@@ -466,6 +466,22 @@ def create_app(
             sup.active_requests = max(0, sup.active_requests - 1)
             sup.last_activity_at = time.monotonic()
 
+        if response.status_code == 508:
+            # The worker's private corrupted-generation signal (token-id-0
+            # loop): restart it immediately and tell the client to retry —
+            # the retry lands on a freshly started worker.
+            sup.requests_failed += 1
+            sup.schedule_restart(
+                "worker reported corrupted generation (HTTP 508)",
+                generation=worker_generation,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Generation produced corrupted output; model serving is "
+                    "restarting. Retry shortly."
+                ),
+            )
         if sup.record_worker_response(
             response.status_code,
             generation=worker_generation,
