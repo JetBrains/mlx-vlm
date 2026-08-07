@@ -83,6 +83,7 @@ class WorkerSupervisor:
         self.requests_forwarded = 0
         self.requests_completed = 0
         self.requests_failed = 0
+        self.requests_cancelled = 0
         self.active_requests = 0
         self.generation = 0
         self.last_activity_at = time.monotonic()
@@ -125,6 +126,7 @@ class WorkerSupervisor:
             "requests_forwarded": self.requests_forwarded,
             "requests_completed": self.requests_completed,
             "requests_failed": self.requests_failed,
+            "requests_cancelled": self.requests_cancelled,
             "consecutive_internal_errors": self.consecutive_500,
         }
 

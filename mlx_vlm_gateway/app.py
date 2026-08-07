@@ -33,6 +33,20 @@ def worker_connect_host(host: str) -> str:
     return "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
 
 
+async def _wait_for_disconnect(request: Request) -> None:
+    """Resolve when the upstream client disconnects.
+
+    Starlette's listen_for_disconnect pattern: the handler has already
+    consumed the request body, so the only message left on the ASGI
+    receive channel is ``http.disconnect``, making this an event-driven
+    disconnect signal (no polling).
+    """
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            return
+
+
 def _proxy_response(response: httpx.Response) -> Response:
     headers = {}
     content_type = response.headers.get("content-type")
@@ -451,12 +465,37 @@ def create_app(
                 ) from exc
             worker_generation = sup.generation
 
-            response = await request.app.state.client.post(
-                f"{settings.worker_url}/v1/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=settings.request_timeout_s,
+            post_task = asyncio.create_task(
+                request.app.state.client.post(
+                    f"{settings.worker_url}/v1/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=settings.request_timeout_s,
+                )
             )
+            disconnect_task = asyncio.create_task(_wait_for_disconnect(request))
+            try:
+                await asyncio.wait(
+                    {post_task, disconnect_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                disconnect_task.cancel()
+            if not post_task.done():
+                # The upstream client is gone. Aborting our connection is
+                # what tells the worker to cancel the generation itself.
+                post_task.cancel()
+                try:
+                    await post_task
+                except (asyncio.CancelledError, httpx.HTTPError):
+                    pass
+                sup.requests_cancelled += 1
+                logger.info(
+                    "Client disconnected; aborted in-flight worker request."
+                )
+                # 499: client closed request; nobody reads this.
+                return Response(status_code=499)
+            response = post_task.result()
         except httpx.TimeoutException as exc:
             sup.requests_failed += 1
             sup.schedule_restart(

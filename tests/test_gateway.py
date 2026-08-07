@@ -605,6 +605,78 @@ def test_worker_508_returns_503_and_restarts_worker(monkeypatch):
         _wait_until(lambda: len(processes) == 2)
 
 
+def test_client_disconnect_aborts_worker_request(monkeypatch):
+    # TestClient cannot hang up mid-request, so this drives the ASGI app
+    # directly: body first, then http.disconnect while the worker "runs".
+    worker_saw_cancel = []
+
+    async def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                worker_saw_cancel.append(True)
+                raise
+        raise AssertionError(request.url.path)
+
+    app, _ = _gateway(monkeypatch, handler)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            sup = app.state.supervisor
+            async def until_ready():
+                while sup.state != "ready":
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(until_ready(), timeout=2.0)
+
+            messages = [
+                {
+                    "type": "http.request",
+                    "body": json.dumps({"messages": []}).encode(),
+                    "more_body": False,
+                },
+                {"type": "http.disconnect"},
+            ]
+
+            async def receive():
+                return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+            sent = []
+
+            async def send(message):
+                sent.append(message)
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/v1/chat/completions",
+                "raw_path": b"/v1/chat/completions",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [(b"content-type", b"application/json")],
+                "client": ("127.0.0.1", 4321),
+                "server": ("127.0.0.1", 80),
+            }
+            await asyncio.wait_for(app(scope, receive, send), timeout=2.0)
+            return sent
+
+    sent = asyncio.run(run())
+    sup = app.state.supervisor
+
+    assert worker_saw_cancel, "worker request was not aborted"
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 499
+    assert sup.active_requests == 0
+    assert sup.requests_cancelled == 1
+    assert sup.requests_failed == 0
+
+
 def test_old_worker_responses_do_not_affect_new_worker(monkeypatch):
     def handler(request):
         if request.url.path == "/ready":
