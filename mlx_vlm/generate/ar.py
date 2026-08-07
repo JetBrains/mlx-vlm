@@ -558,7 +558,7 @@ _SEQUENCE_ALIGNED_PROMPT_KWARGS = {
     "token_type_ids",
 }
 
-APC_PRIVATE_PROMPT_KEYS = ("_apc_tenant", "_apc_image_hash")
+APC_PRIVATE_PROMPT_KEYS = ("_apc_tenant", "_apc_image_hash", "_apc_pin_len")
 
 
 def _is_mrope_position_ids_prompt_kwarg(key: str, v: mx.array) -> bool:
@@ -1721,19 +1721,28 @@ class PromptProcessingBatch:
             return True
         return self._inputs_embeds.shape[1] > self.prefill_step_size
 
+    # Prefill positions where a row's prompt cache is snapshotted into APC:
+    # the regular checkpoint just inside the prompt tail, and the optional
+    # pinned stable-prefix boundary (see "_apc_pin_len" in prompt_kwargs),
+    # which is also persisted to the APC disk tier.
+    _APC_STORE_SPECS = (
+        ("checkpoint_len", "checkpoint_done", False),
+        ("pin_len", "pin_done", True),
+    )
+
     def _apc_checkpoint_column_for_meta(
-        self, batch_idx: int, meta: dict
+        self,
+        batch_idx: int,
+        meta: dict,
+        length_key: str = "checkpoint_len",
+        done_key: str = "checkpoint_done",
     ) -> Optional[int]:
-        checkpoint_len = int(meta.get("checkpoint_len") or 0)
-        if (
-            self._apc_mode != "exact"
-            or checkpoint_len <= 0
-            or meta.get("checkpoint_done")
-        ):
+        checkpoint_len = int(meta.get(length_key) or 0)
+        if self._apc_mode != "exact" or checkpoint_len <= 0 or meta.get(done_key):
             return None
         prefix_len = int(meta.get("prefix_len", 0) or 0)
         if checkpoint_len <= prefix_len:
-            meta["checkpoint_done"] = True
+            meta[done_key] = True
             return None
         if self._right_pad_per_row is not None:
             suffix_checkpoint = checkpoint_len - prefix_len
@@ -1756,10 +1765,13 @@ class PromptProcessingBatch:
         for batch_idx, meta in enumerate(self._apc_meta):
             if meta is None:
                 continue
-            col = self._apc_checkpoint_column_for_meta(batch_idx, meta)
-            if col is None or col <= start or col >= end:
-                continue
-            next_col = col if next_col is None else min(next_col, col)
+            for length_key, done_key, _pinned in self._APC_STORE_SPECS:
+                col = self._apc_checkpoint_column_for_meta(
+                    batch_idx, meta, length_key, done_key
+                )
+                if col is None or col <= start or col >= end:
+                    continue
+                next_col = col if next_col is None else min(next_col, col)
         return next_col
 
     def _row_real_tokens_processed(self, batch_idx: int) -> int:
@@ -1783,22 +1795,39 @@ class PromptProcessingBatch:
         if self._apc_manager is None or self._apc_mode != "exact":
             return
         for batch_idx, meta in enumerate(self._apc_meta):
-            if meta is None or meta.get("checkpoint_done"):
+            if meta is None:
                 continue
-            checkpoint_len = int(meta.get("checkpoint_len") or 0)
-            if checkpoint_len <= 0:
-                continue
-            if self._row_real_tokens_processed(batch_idx) != checkpoint_len:
-                continue
-            prompt_cache = self._apc_prompt_cache_for_store(batch_idx)
-            if prompt_cache is None:
-                continue
-            self._apc_manager.store_exact_cache(
-                meta["full_input_ids"][:checkpoint_len],
-                prompt_cache,
-                extra_hash=meta.get("extra_hash", 0),
-            )
-            meta["checkpoint_done"] = True
+            for length_key, done_key, pinned in self._APC_STORE_SPECS:
+                if meta.get(done_key):
+                    continue
+                checkpoint_len = int(meta.get(length_key) or 0)
+                if checkpoint_len <= 0:
+                    continue
+                if self._row_real_tokens_processed(batch_idx) != checkpoint_len:
+                    continue
+                token_ids = meta["full_input_ids"][:checkpoint_len]
+                extra_hash = meta.get("extra_hash", 0)
+                if pinned:
+                    # The pinned boundary is shared by every request of a
+                    # session family; skip the (expensive) snapshot clone
+                    # when it is already pinned and persisted.
+                    already = getattr(
+                        self._apc_manager, "has_pinned_exact_prefix", None
+                    )
+                    if callable(already) and already(token_ids, extra_hash):
+                        meta[done_key] = True
+                        continue
+                prompt_cache = self._apc_prompt_cache_for_store(batch_idx)
+                if prompt_cache is None:
+                    continue
+                store_kwargs = {"pinned": True} if pinned else {}
+                self._apc_manager.store_exact_cache(
+                    token_ids,
+                    prompt_cache,
+                    extra_hash=extra_hash,
+                    **store_kwargs,
+                )
+                meta[done_key] = True
 
     def _prompt_kwargs_for_step(self, n: Optional[int] = None) -> dict:
         if n is None or not self._prompt_length_aware_keys:
@@ -2438,6 +2467,11 @@ class BatchGenerator:
                 ),
                 "apc_blocks": picks[i].get("matched_blocks", []) if picks[i] else [],
                 "checkpoint_len": self._apc_exact_checkpoint_len(full_ids[i]),
+                # Caller-requested pinned-prefix boundary (an APC-private
+                # prompt kwarg, never forwarded to the model).
+                "pin_len": int(
+                    (prompt_kwargs_list[i] or {}).get("_apc_pin_len") or 0
+                ),
             }
             for i in range(len(sequences))
         ]
@@ -2493,6 +2527,7 @@ class BatchGenerator:
                     "extra_hash": extra_hash,
                     "apc_blocks": [],
                     "checkpoint_len": self._apc_exact_checkpoint_len(list(ids_list)),
+                    "pin_len": int((kw or {}).get("_apc_pin_len") or 0),
                 }
             )
         return meta

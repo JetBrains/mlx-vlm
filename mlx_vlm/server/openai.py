@@ -1749,6 +1749,22 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
             **template_kwargs,
         )
 
+        # Junie warm-start: pin the stable prompt prefix's KV in APC during
+        # this request's own prefill (see junie.prefix_pin; off unless the
+        # junie launcher sets MLX_VLM_PIN_STABLE_PREFIX).
+        if os.environ.get("MLX_VLM_PIN_STABLE_PREFIX"):
+            from .junie.prefix_pin import stable_prefix_probe_text
+
+            gen_args.pin_probe_text = stable_prefix_probe_text(
+                processed_messages,
+                formatted_prompt,
+                bool(images or audio or videos),
+                processor,
+                config,
+                tools,
+                template_kwargs,
+            )
+
         logger.debug(
             "chat/completions request: model=%s images=%d audio=%d videos=%d "
             "max_tokens=%s temp=%s stream=%s",

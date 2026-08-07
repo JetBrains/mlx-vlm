@@ -1054,6 +1054,14 @@ class DiskBlockStore:
                 self._read_mode,
             )
             self._read_mode = "direct"
+        # Cap on stored exact prompt-cache snapshots. Each one is a full
+        # multi-hundred-MB prefix (KV + recurrent state), so unlike block
+        # shards they get a small entry-count LRU rather than a byte budget.
+        # 0 (the default) keeps the stock unbounded behavior; the Junie
+        # launcher sets it from the pin_stable_prefix config.
+        self._exact_max_entries = max(
+            0, int(os.environ.get("APC_DISK_EXACT_MAX", "0"))
+        )
         # Bounded LRU of parsed safetensors headers:
         # shard_path -> (tensor_entries, file_metadata, data_start).
         self._header_cache: "OrderedDict[Path, Tuple[dict, dict, int]]" = OrderedDict()
@@ -1096,6 +1104,7 @@ class DiskBlockStore:
             )
         # Build index from existing shards and compute current byte usage.
         self._disk_bytes = self._rebuild_index()
+        self._prune_exact_entries()
 
         self._workers = [
             threading.Thread(
@@ -1424,6 +1433,51 @@ class DiskBlockStore:
         with self._index_lock:
             return cache_hash in self._exact_index
 
+    def has_exact_or_pending(self, cache_hash: int) -> bool:
+        """Like :meth:`has_exact`, but also counts a queued unwritten save."""
+        if self.has_exact(cache_hash):
+            return True
+        with self._in_flight_lock:
+            return cache_hash in self._in_flight
+
+    def _prune_exact_entries(self) -> int:
+        """Drop the oldest exact snapshots beyond ``APC_DISK_EXACT_MAX``.
+
+        Ordered by file mtime, which :meth:`load_exact_cache` refreshes on
+        every successful restore — so "oldest" means least recently used,
+        not least recently written.
+        """
+        if self._exact_max_entries <= 0:
+            return 0
+        dropped = 0
+        with self._index_lock:
+            entries = []
+            for cache_hash, path in self._exact_index.items():
+                try:
+                    entries.append((path.stat().st_mtime, cache_hash, path))
+                except OSError:
+                    continue
+            entries.sort()
+            for _, cache_hash, path in entries[
+                : max(0, len(entries) - self._exact_max_entries)
+            ]:
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                except OSError:
+                    continue
+                self._exact_index.pop(cache_hash, None)
+                self._disk_bytes = max(0, self._disk_bytes - size)
+                self.evictions += 1
+                dropped += 1
+        if dropped:
+            logger.info(
+                "APC disk: pruned %d exact snapshot(s) beyond the cap of %d",
+                dropped,
+                self._exact_max_entries,
+            )
+        return dropped
+
     def find_exact_prefix(
         self,
         token_ids: Sequence[int],
@@ -1487,9 +1541,15 @@ class DiskBlockStore:
                         path = self._exact_index.get(cache_hash)
             if path is None:
                 return None
-        return self._load_exact_cache_file(
+        loaded = self._load_exact_cache_file(
             path, min_capacity_tokens=min_capacity_tokens
         )
+        if loaded is not None:
+            try:
+                os.utime(path)  # LRU freshness for _prune_exact_entries
+            except OSError:
+                pass
+        return loaded
 
     def _load_exact_cache_file(
         self,
@@ -2860,6 +2920,7 @@ class DiskBlockStore:
             pass
         with self._index_lock:
             self._exact_index[int(snapshot.cache_hash)] = path
+        self._prune_exact_entries()
         self._maybe_evict()
         return [int(snapshot.cache_hash)]
 
@@ -3296,11 +3357,17 @@ class APCManager:
                                 prompt_cache, quantize_kv=True
                             )
                             if promoted is not None:
+                                # Under the default pinned disk scope every
+                                # exact disk entry is a pinned seed prefix,
+                                # so the promotion re-pins it: the restored
+                                # boundary stays memory-warm instead of
+                                # rotating out with conversation turnover.
                                 self._store_exact_session(
                                     stored_tokens,
                                     int(extra_hash),
                                     promoted,
                                     session_kinds,
+                                    pinned=self._disk_exact_scope == "pinned",
                                 )
                             with self.lock:
                                 self.stats.exact_hits += 1
@@ -3386,6 +3453,7 @@ class APCManager:
         extra_hash: int,
         copied: List[Any],
         kinds: List[str],
+        pinned: bool = False,
     ) -> bool:
         """Store a snapshot into session storage (see :class:`APCSession`)."""
         kv_row = [c if k == "kv" else None for c, k in zip(copied, kinds)]
@@ -3393,6 +3461,7 @@ class APCManager:
         length = len(token_tuple)
         now = time.time()
         with self.lock:
+            pinning = pinned or self._pin_next_session_store
             target: Optional[APCSession] = None
             target_key: Optional[int] = None
             for key, sess in self._sessions.items():
@@ -3402,7 +3471,7 @@ class APCManager:
                 # live conversation that extends the seed prefix gets its
                 # own session, so the seed's anchor and checkpoint never
                 # rotate out. (The seed's own store carries the pin flag.)
-                if sess.pinned and not self._pin_next_session_store:
+                if sess.pinned and not pinning:
                     continue
                 anchor_len = len(sess.token_ids)
                 if length >= anchor_len:
@@ -3430,7 +3499,7 @@ class APCManager:
                 # Extends (or equals) the anchor: the new KV supersedes it.
                 target.token_ids = token_tuple
                 target.kv_caches = kv_row
-            if self._pin_next_session_store:
+            if pinning:
                 target.pinned = True
                 self._pin_next_session_store = False
             # Pinned sessions don't count against the LRU cap and are
@@ -3458,6 +3527,38 @@ class APCManager:
         """
         with self.lock:
             self._pin_next_session_store = True
+
+    def has_pinned_exact_prefix(
+        self, token_ids: Sequence[int], extra_hash: int = 0
+    ) -> bool:
+        """Whether this exact prefix is already pinned in memory AND on disk
+        (written or queued for writing).
+
+        Used by the prefill harvest to skip re-cloning and re-persisting a
+        stable prompt prefix that every request of a session family shares.
+        """
+        token_tuple = tuple(int(t) for t in token_ids)
+        if not token_tuple:
+            return False
+        length = len(token_tuple)
+        pinned_in_memory = False
+        with self.lock:
+            for sess in self._sessions.values():
+                if (
+                    sess.pinned
+                    and sess.extra_hash == extra_hash
+                    and len(sess.token_ids) >= length
+                    and sess.token_ids[:length] == token_tuple
+                    and length in sess.checkpoints
+                ):
+                    pinned_in_memory = True
+                    break
+        if not pinned_in_memory:
+            return False
+        if self.disk is None:
+            return True
+        key = _sequence_hash(token_tuple, extra_hash, self.block_size)
+        return self.disk.has_exact_or_pending(key)
 
     def _match_session_locked(
         self,
@@ -3564,8 +3665,16 @@ class APCManager:
         prompt_cache: Sequence[Any],
         *,
         extra_hash: int = 0,
+        pinned: bool = False,
     ) -> bool:
-        """Store a full prompt-cache snapshot for exact-prefix reuse."""
+        """Store a full prompt-cache snapshot for exact-prefix reuse.
+
+        With ``pinned`` the stored session is exempt from LRU eviction and
+        the snapshot is persisted to the disk tier (the same treatment the
+        one-shot ``pin_next_session_store`` flag gives the seed warmup) —
+        used for stable prompt prefixes harvested mid-prefill from live
+        traffic.
+        """
         if (
             self._exact_cache_max <= 0
             and self._exact_session_max <= 0
@@ -3577,7 +3686,7 @@ class APCManager:
             # Sampled before the session store consumes the flag: marks this
             # store as the pinned seed prefix, which is the only snapshot
             # persisted to disk under APC_DISK_EXACT_SCOPE=pinned.
-            pin_pending = self._pin_next_session_store
+            pin_pending = pinned or self._pin_next_session_store
         copied = _clone_prompt_cache_for_apc(prompt_cache, quantize_kv=True)
         if copied is None:
             types = [type(c).__name__ for c in prompt_cache]
@@ -3603,7 +3712,7 @@ class APCManager:
             # Hybrid attention/SSM layout: session storage shares one KV set
             # across all checkpoints instead of duplicating it per snapshot.
             stored = self._store_exact_session(
-                token_tuple, extra_hash, copied, session_kinds
+                token_tuple, extra_hash, copied, session_kinds, pinned=pin_pending
             )
             if stored:
                 apc_trace(
@@ -3642,6 +3751,12 @@ class APCManager:
                 with self.lock:
                     self.stats.disk_writes += 1
                 stored = True
+                if pin_pending:
+                    logger.info(
+                        "APC: pinned prefix snapshot scheduled to disk "
+                        "(tokens=%d)",
+                        len(token_tuple),
+                    )
             except Exception as e:
                 logger.warning("APC exact disk save scheduling failed: %s", e)
         if stored:

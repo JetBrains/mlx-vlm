@@ -65,11 +65,14 @@ DEFAULT_CONFIG = {
     "int8_prefill": True,
     "prefill_step_size": 1024,
     "preserve_thinking": True,
-    # Path to a chat-completions body whose prompt prefix is prefilled and
-    # pinned at startup. Off by default: seeding is being reworked, and the
-    # checkout-relative research/junie.json it used to default to does not
-    # exist in a packaged build.
-    "seed_request": None,
+    # How many stable Junie prompt prefixes (the messages before the
+    # issue-description message) to keep pinned: each one's KV is
+    # snapshotted during a request's own prefill and persisted to the APC
+    # disk tier, so new sessions — including right after a restart — start
+    # warm at that boundary instead of re-prefilling ~15k tokens. A prompt
+    # change simply pins a new snapshot while the least recently used one
+    # ages out. 0 disables pinning.
+    "pin_stable_prefix": 5,
     "log_raw_tokens": True,
     "apc_enabled": True,
     "apc_exact_sessions": 4,
@@ -118,7 +121,7 @@ _VALIDATORS = {
     "int8_prefill": lambda value: isinstance(value, bool),
     "prefill_step_size": _is_int_in(1, 1 << 20),
     "preserve_thinking": lambda value: isinstance(value, bool),
-    "seed_request": lambda value: value is None or isinstance(value, str),
+    "pin_stable_prefix": _is_int_in(0, 64),
     "log_raw_tokens": lambda value: isinstance(value, bool),
     "apc_enabled": lambda value: isinstance(value, bool),
     "apc_exact_sessions": _is_int_in(0, 64),

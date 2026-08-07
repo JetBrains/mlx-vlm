@@ -60,7 +60,6 @@ def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
         "port": 12345,
         "worker_port": 12346,
         "prefill_step_size": 2048,
-        "seed_request": "",
         "int8_prefill": False,
         "preserve_thinking": False,
         "log_raw_tokens": False,
@@ -83,11 +82,24 @@ def test_launcher_builds_worker_settings(monkeypatch, tmp_path):
         "0",
     ]
 
+    launch.apply_inference_env({**cfg, "pin_stable_prefix": 0})
+    assert "MLX_VLM_PIN_STABLE_PREFIX" not in os.environ
+    assert "APC_DISK_EXACT_MAX" not in os.environ
+
+    # Pinning rides on APC harvesting; without APC there is nothing to pin.
+    launch.apply_inference_env({**cfg, "apc_enabled": False})
+    assert "MLX_VLM_PIN_STABLE_PREFIX" not in os.environ
+
+    # Last, so the process env other tests inherit reflects the stock config.
     launch.apply_inference_env(cfg)
     assert os.environ["APC_ENABLED"] == "1"
     assert os.environ["APC_DISK_PATH"] == str(tmp_path / "cache")
     assert os.environ["MLX_VLM_NGRAM_MAX"] == "6"
     assert os.environ["MLX_VLM_MAX_CONCURRENT_REQUESTS"] == "1"
+    # pin_stable_prefix (default 5) is both the enable flag and the disk
+    # snapshot cap.
+    assert os.environ["MLX_VLM_PIN_STABLE_PREFIX"] == "5"
+    assert os.environ["APC_DISK_EXACT_MAX"] == "5"
 
 
 def test_launcher_logs_the_config_it_resolved(monkeypatch, capsys):
@@ -109,15 +121,6 @@ def test_launcher_logs_the_config_it_resolved(monkeypatch, capsys):
     # cli.main configures logging as well, but only once argparse has run —
     # by then this record is already gone unless the launcher got there first.
     assert "model=demo-model" in capsys.readouterr().err
-
-
-def test_seed_prefill_is_off_unless_a_request_is_configured(tmp_path):
-    assert "--seed-request" not in launch.build_argv(DEFAULT_CONFIG)
-
-    seed = str(tmp_path / "seed.json")
-    argv = launch.build_argv({**DEFAULT_CONFIG, "seed_request": seed})
-
-    assert argv[argv.index("--seed-request") + 1] == seed
 
 
 def test_pre_m5_mac_uses_dequant_prefill(monkeypatch):

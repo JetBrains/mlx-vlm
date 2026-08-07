@@ -768,6 +768,10 @@ class GenerationArguments:
     # cached blocks from one tenant can't be reused (or detected via timing)
     # by another. None = no salt = single-tenant behaviour.
     tenant_id: Optional[str] = None
+    # Rendered boundary probe (see mlx_vlm.server.junie.prefix_pin): the
+    # longest common token prefix of prompt and probe is pinned in APC
+    # during this request's own prefill and persisted to the APC disk tier.
+    pin_probe_text: Optional[str] = None
 
     def diffusion_kwargs(self) -> dict:
         """Diffusion-only generation kwargs explicitly supplied by a request."""
@@ -879,6 +883,9 @@ class QueuedGenerationRequest:
     audio: Optional[List] = None
     request_id: Optional[str] = None
     queued_at: float = field(default_factory=time.perf_counter)
+    # Verified stable-prefix boundary from args.pin_probe_text, in tokens
+    # (0 = don't pin).
+    pin_prefix_len: int = 0
 
 
 @dataclass
@@ -1268,6 +1275,13 @@ class ResponseGenerator:
             thinking_budget_criteria = self._make_thinking_budget_criteria(
                 args, raw_inputs.get("input_ids")
             )
+            pin_prefix_len = 0
+            if args.pin_probe_text:
+                from .junie.prefix_pin import pin_boundary_token_len
+
+                pin_prefix_len = pin_boundary_token_len(
+                    self, args.pin_probe_text, raw_inputs
+                )
         prompt_tokens = _count_prompt_tokens(raw_inputs)
         _check_configured_context_budget(prompt_tokens, args.max_tokens)
 
@@ -1283,6 +1297,7 @@ class ResponseGenerator:
             audio=audio,
             request_id=request_id,
             queued_at=request_started_at,
+            pin_prefix_len=pin_prefix_len,
         )
         logger.info(
             "Generation queued: request=%s prompt_tokens=%d max_tokens=%d "
@@ -1960,6 +1975,10 @@ class ResponseGenerator:
                     # it before merging kwargs for the language model.
                     if getattr(args, "tenant_id", None):
                         gen_kwargs["_apc_tenant"] = args.tenant_id
+                    # Stable-prefix boundary (tokens): BatchGenerator pins the
+                    # snapshot there during prefill and persists it to disk.
+                    if request.pin_prefix_len > 0:
+                        gen_kwargs["_apc_pin_len"] = request.pin_prefix_len
 
                     # Drain pending text-only prompts before inserting an
                     # embed-bearing request — multi-row PromptProcessingBatch
