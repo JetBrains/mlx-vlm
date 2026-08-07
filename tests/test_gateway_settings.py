@@ -4,7 +4,7 @@ import os
 import pytest
 
 import mlx_vlm_gateway.settings as settings_module
-from mlx_vlm_gateway.app import apply_model_cache_env, build_settings
+from mlx_vlm_gateway.app import apply_model_cache_env, build_settings, rotate_worker_log
 from mlx_vlm_gateway.settings import (
     DEFAULT_PUBLIC_SETTINGS,
     SettingsStore,
@@ -36,6 +36,42 @@ def test_daemon_settings_come_from_the_config(tmp_path):
     assert settings.worker_url == f"http://127.0.0.1:{DEFAULT_CONFIG['worker_port']}"
     assert settings.worker_command == worker_command()
     assert settings.config_path == path
+
+
+def test_worker_log_sits_beside_the_config(tmp_path):
+    path = str(tmp_path / "server-config.json")
+
+    settings = build_settings(path, DEFAULT_CONFIG)
+
+    assert settings.worker_log_path == str(tmp_path / "junie-mlx-vlm.log")
+
+
+def test_rotation_keeps_one_previous_run(tmp_path):
+    log = tmp_path / "junie-mlx-vlm.log"
+
+    # Nothing yet: rotating is a no-op that still makes the directory usable.
+    rotate_worker_log(str(log))
+    assert not log.exists() and not (tmp_path / "junie-mlx-vlm.log.0").exists()
+
+    log.write_text("first run\n")
+    rotate_worker_log(str(log))
+    assert (tmp_path / "junie-mlx-vlm.log.0").read_text() == "first run\n"
+    assert not log.exists()
+
+    log.write_text("second run\n")
+    rotate_worker_log(str(log))
+
+    # Only one generation is kept, so the first run is gone.
+    assert (tmp_path / "junie-mlx-vlm.log.0").read_text() == "second run\n"
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["junie-mlx-vlm.log.0"]
+
+
+def test_rotation_creates_a_missing_directory(tmp_path):
+    log = tmp_path / "fresh-machine" / "junie-mlx-vlm.log"
+
+    rotate_worker_log(str(log))
+
+    assert log.parent.is_dir()
 
 
 def test_daemon_exports_the_configured_models_dir_to_the_worker(monkeypatch, tmp_path):

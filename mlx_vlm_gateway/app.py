@@ -25,6 +25,8 @@ from .supervisor import GatewaySettings, WorkerSupervisor, worker_command
 
 logger = logging.getLogger("mlx_vlm.gateway")
 
+WORKER_LOG_NAME = "junie-mlx-vlm.log"
+
 
 def worker_connect_host(host: str) -> str:
     """The address to reach a worker bound to ``host`` from this process."""
@@ -512,6 +514,25 @@ def create_app(
     return app
 
 
+def worker_log_path(config_file: str) -> str:
+    """The worker's log, beside the config that named the model it serves."""
+    return os.path.join(os.path.dirname(config_file), WORKER_LOG_NAME)
+
+
+def rotate_worker_log(path: str) -> None:
+    """Start this run's log fresh, keeping the last one as <name>.0.
+
+    One generation is enough to answer "it died, what happened before I
+    restarted it", and it bounds what an unattended machine accumulates --
+    a long run is not bounded, and log_raw_tokens writes every token.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        os.replace(path, f"{path}.0")
+    except FileNotFoundError:
+        pass
+
+
 def apply_model_cache_env(config: dict) -> None:
     """Point the worker's Hugging Face cache at the configured models dir.
 
@@ -534,6 +555,7 @@ def build_settings(path: str, config: dict) -> GatewaySettings:
     return GatewaySettings(
         worker_url=f"http://{worker_host}:{config['worker_port']}",
         worker_command=worker_command(),
+        worker_log_path=worker_log_path(path),
         config_path=path,
     )
 
@@ -554,9 +576,16 @@ def main(argv: Optional[Sequence[str]] = None):
     path = config_path()
     config = load_config(path)
     apply_model_cache_env(config)
+    settings = build_settings(path, config)
+    rotate_worker_log(settings.worker_log_path)
     logger.info("Config: %s (models: %s)", path, os.environ["HF_HUB_CACHE"])
+    logger.info(
+        "Worker log: %s (previous run kept as %s.0)",
+        settings.worker_log_path,
+        settings.worker_log_path,
+    )
     uvicorn.run(
-        create_app(build_settings(path, config)),
+        create_app(settings),
         host=config["host"],
         port=config["port"],
         workers=1,

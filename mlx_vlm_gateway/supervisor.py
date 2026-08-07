@@ -4,6 +4,7 @@ import os
 import signal
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Optional
 
@@ -41,6 +42,9 @@ def worker_command() -> tuple[str, ...]:
 class GatewaySettings:
     worker_url: str = "http://127.0.0.1:19240"
     worker_command: tuple[str, ...] = ()
+    # File the worker's stdout and stderr go to; None leaves it inheriting
+    # this process's, which is what a checkout wants.
+    worker_log_path: Optional[str] = None
     startup_timeout_s: float = 120.0
     # Hard limit for a worker that cannot acknowledge cancellation; the
     # worker's own softer limit comes from "soft_request_timeout" in the
@@ -202,6 +206,16 @@ class WorkerSupervisor:
                 return
             await self._spawn_locked()
 
+    def _open_worker_log(self):
+        """Where the worker's output goes, or nothing to inherit ours.
+
+        Opened per spawn and in append mode, so every worker of this run
+        writes to the same file, one after another. Rotation happens once,
+        when the daemon starts.
+        """
+        path = self.settings.worker_log_path
+        return open(path, "a", encoding="utf-8") if path else nullcontext(None)
+
     async def _spawn_locked(self) -> None:
         command = self.settings.worker_command
         logger.info("Starting inference worker: %s", " ".join(command))
@@ -221,7 +235,13 @@ class WorkerSupervisor:
         self.state = "starting"
         self.last_error = None
         try:
-            self.process = await asyncio.create_subprocess_exec(*command, **kwargs)
+            # The child dups whatever it is handed, so this copy is only
+            # needed for the length of the spawn.
+            with self._open_worker_log() as log:
+                if log is not None:
+                    kwargs["stdout"] = log
+                    kwargs["stderr"] = log
+                self.process = await asyncio.create_subprocess_exec(*command, **kwargs)
         except OSError as exc:
             self.process = None
             self.last_error = f"Failed to start inference worker: {exc}"

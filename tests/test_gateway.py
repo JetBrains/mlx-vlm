@@ -102,6 +102,36 @@ def _wait_until(predicate, timeout=1.0):
     raise AssertionError("condition did not become true")
 
 
+def test_worker_output_goes_to_the_configured_log(monkeypatch, tmp_path):
+    log = tmp_path / "junie-mlx-vlm.log"
+
+    def handler(request):
+        return httpx.Response(200, json={"status": "ready"})
+
+    app, processes = _gateway(monkeypatch, handler, worker_log_path=str(log))
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/ready").status_code == 200)
+        spawned = processes[0].spawn_kwargs
+
+    # One file for both streams, opened for append so restarts within a run
+    # add to it instead of truncating each other.
+    assert spawned["stdout"] is spawned["stderr"]
+    assert spawned["stdout"].name == str(log)
+    assert spawned["stdout"].mode == "a"
+
+
+def test_worker_inherits_our_output_when_no_log_is_configured(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json={"status": "ready"})
+
+    app, processes = _gateway(monkeypatch, handler)
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/ready").status_code == 200)
+        spawned = processes[0].spawn_kwargs
+
+    assert "stdout" not in spawned and "stderr" not in spawned
+
+
 def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
     captured = []
 
