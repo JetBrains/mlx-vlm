@@ -131,7 +131,8 @@ Use the control script instead of hand-written curl commands:
 
 Changing only `auto_unload_time` is live. Model, context-limit, and KV-cache
 changes stop the worker, atomically save the config, and launch a new worker.
-If inference is active, the interactive script asks before interrupting it.
+If inference is active, the request is rejected with `409` unless you add
+`force=true`.
 See [JUNIE_API.md](JUNIE_API.md) for exact request and response formats.
 
 When the configured idle timeout expires, the gateway kills the worker and

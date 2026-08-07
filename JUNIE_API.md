@@ -185,6 +185,9 @@ Worker-only monitoring endpoints return `503` while the worker is stopped.
 ./serverctl.sh stop
 ```
 
-When inference is active, interactive `serverctl.sh apply` asks whether it
-should stop the request and retry with `force=true`. Non-interactive callers
-must pass `force=true` explicitly.
+When inference is active, a restart setting is rejected with `409` until the
+request finishes or `force=true` is passed.
+
+Only `start` knows how the server is launched; every other command is plain
+HTTP against the port in `server-config.json`, so the script drives a
+checkout and an unpacked tarball alike.
