@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
     "models_dir": "~/.local/share/junie-local/models",
     "max_context_length": None,
     "kv_quantization": True,
-    "auto_unload_time": 600,
+    "auto_unload_time": 60,
     # Seconds after which the worker ends a single request cleanly, before
     # Junie's five-minute retry window. Keep it under the daemon's 275s hard
     # limit for workers that cannot acknowledge cancellation; null disables
@@ -59,7 +59,7 @@ DEFAULT_CONFIG = {
     # One address for both processes: the daemon serves the public API on
     # "port", and the worker it spawns serves the private inference API on
     # "worker_port".
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 19239,
     "worker_port": 19240,
     "int8_prefill": True,
@@ -73,10 +73,10 @@ DEFAULT_CONFIG = {
     # change simply pins a new snapshot while the least recently used one
     # ages out. 0 disables pinning.
     "pin_stable_prefix": 5,
-    "log_raw_tokens": True,
+    "log_raw_tokens": False,
     "apc_enabled": True,
-    "apc_exact_sessions": 4,
-    "apc_session_checkpoints": 15,
+    "apc_exact_sessions": 2,
+    "apc_session_checkpoints": 4,
     "apc_disk_path": None,
     "ngram_max": 8,
     # Daemon-side supervisor tuning: how long to wait for the worker to
