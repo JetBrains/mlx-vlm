@@ -98,7 +98,7 @@ untapped headroom — the only such headroom found in this entire investigation.
 
 - Prefill: **~860 tok/s**; decode: ~48 tok/s (no drafter in this test).
 
-## 4. `--dequant-prefill` patch: evaluated, DO NOT enable
+## 4. `--dequant-prefill` patch: evaluated, DO NOT enable on M5
 
 The repo has `mlx_vlm/dequant_prefill.py` wired via `--dequant-prefill` /
 `MLX_VLM_DEQUANT_PREFILL=1` (applied in server lifespan, `server/app.py`). It transiently
@@ -110,6 +110,11 @@ see §3.2), and the per-call dequant materialization costs more than it saves:
   collapsing to 411 tok/s (allocator/cache churn from transient ~170 MB bf16 buffers).
 
 Re-evaluate only if a future MLX changes the qmm-vs-GEMM balance.
+
+**M4 and older invert both results** (no NAX: bf16 GEMM drops to ~14 TFLOPS
+and qmm falls behind dequant+GEMM). There `--dequant-prefill` wins (+11% e2e)
+and `--int8-prefill` is pure overhead, so the launcher picks the prefill patch
+by chip generation — see `research/m4-tuning/README.md`.
 
 ## 5. Hardware & API capability map
 

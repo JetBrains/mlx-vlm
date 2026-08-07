@@ -120,16 +120,43 @@ def test_seed_prefill_is_off_unless_a_request_is_configured(tmp_path):
     assert argv[argv.index("--seed-request") + 1] == seed
 
 
-def test_pre_m5_mac_uses_standard_prefill(monkeypatch):
+def test_pre_m5_mac_uses_dequant_prefill(monkeypatch):
+    # No neural accelerators to run int8 GEMMs on, but dequantizing to bf16
+    # GEMMs beats the quantized kernels there (research/m4-tuning).
     monkeypatch.setattr(launch, "_apple_chip_generation", lambda: 4)
 
-    assert "--int8-prefill" not in launch.build_argv(DEFAULT_CONFIG)
+    argv = launch.build_argv(DEFAULT_CONFIG)
+
+    assert "--dequant-prefill" in argv
+    assert "--int8-prefill" not in argv
 
 
 def test_m5_mac_uses_int8_prefill(monkeypatch):
     monkeypatch.setattr(launch, "_apple_chip_generation", lambda: 5)
 
-    assert "--int8-prefill" in launch.build_argv(DEFAULT_CONFIG)
+    argv = launch.build_argv(DEFAULT_CONFIG)
+
+    assert "--int8-prefill" in argv
+    assert "--dequant-prefill" not in argv
+
+
+def test_unknown_gpu_uses_standard_prefill(monkeypatch):
+    # Neither patch was measured off Apple silicon; keep the stock kernels.
+    monkeypatch.setattr(launch, "_apple_chip_generation", lambda: None)
+
+    argv = launch.build_argv(DEFAULT_CONFIG)
+
+    assert "--int8-prefill" not in argv
+    assert "--dequant-prefill" not in argv
+
+
+def test_prefill_patch_can_be_turned_off(monkeypatch):
+    monkeypatch.setattr(launch, "_apple_chip_generation", lambda: 4)
+
+    argv = launch.build_argv({**DEFAULT_CONFIG, "int8_prefill": False})
+
+    assert "--int8-prefill" not in argv
+    assert "--dequant-prefill" not in argv
 
 
 def test_gateway_owns_auto_unload(monkeypatch):

@@ -158,12 +158,29 @@ def build_argv(cfg: dict) -> List[str]:
         "--quantized-kv-start",
         "0",
     ]
-    if cfg.get("int8_prefill") and (_apple_chip_generation() or 0) >= 5:
-        argv.append("--int8-prefill")
-    elif cfg.get("int8_prefill"):
-        logger.warning(
-            "int8 prefill requires Apple M5 or newer; using standard prefill."
-        )
+    # "int8_prefill" asks for the fastest prefill path this machine has; which
+    # patch that is depends on the GPU. The int8 MPP kernels only pay off on
+    # the M5+ neural accelerators (research/int8-nax/README.md); on M1-M4 they
+    # run at plain bf16-GEMM speed, and there the winning path is transient
+    # dequantization to bf16 GEMMs instead — the reverse of the M5 result,
+    # where it costs 10% (research/m4-tuning/README.md: 214 vs 193 tok/s
+    # prefill on M4 Max, +11%). Off means neither patch, and an unrecognized
+    # GPU gets the stock quantized kernels, since neither was measured there.
+    chip_generation = _apple_chip_generation()
+    if cfg.get("int8_prefill"):
+        if (chip_generation or 0) >= 5:
+            argv.append("--int8-prefill")
+        elif chip_generation is not None:
+            logger.info(
+                "int8 prefill needs Apple M5 or newer; using dequantized "
+                "prefill, which is the faster path on M%d.",
+                chip_generation,
+            )
+            argv.append("--dequant-prefill")
+        else:
+            logger.warning(
+                "int8 prefill requires Apple M5 or newer; using standard prefill."
+            )
     if cfg.get("preserve_thinking"):
         argv.append("--preserve-thinking")
     if cfg.get("log_raw_tokens"):
