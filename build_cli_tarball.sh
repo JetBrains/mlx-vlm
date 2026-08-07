@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Freeze `python -m mlx_vlm.server` into a self-contained tar.gz, from this
-# checkout's own mlx_vlm/server/__main__.py -- no wrapper script.
+# Freeze the junie-mlx-vlm dispatcher into a self-contained tar.gz, from
+# this checkout's own mlx_vlm_gateway/cli.py -- no wrapper script.
 #
-#   Output:  dist/mlx-vlm-server-<version>-macos-<arch>.tar.gz
-#   Run:     mlx-vlm-server/mlx-vlm-server --host 0.0.0.0 --port 8085 --model <id> ...
+#   Output:  dist/junie-mlx-vlm-<version>-macos-<arch>.tar.gz
+#   Run:     junie-mlx-vlm/junie-mlx-vlm
 #
-# The flags are identical to `python -m mlx_vlm.server`, so start.sh only swaps
-# the program name.
+# The program takes no options. Both the daemon and the inference worker it
+# spawns read every setting from JUNIE_SERVER_CONFIG (default
+# ~/.local/share/junie-local/server-config.json), and one executable serves
+# both because the daemon re-invokes it as `junie-mlx-vlm worker` -- a
+# frozen build has no interpreter to hand `-m` to.
 #
-# That entry file works here because its import is absolute. PyInstaller runs
-# its entry script in script mode, where __package__ is empty and a relative
-# import (`from . import main`, as upstream has it) raises "attempted relative
-# import with no known parent package"; `python -m` avoids that only because
-# runpy imports the package and sets __package__ first.
+# That entry file works here because its imports are absolute. PyInstaller
+# runs its entry script in script mode, where __package__ is empty and a
+# relative import (`from .app import main`, as the two __main__.py files
+# have it) raises "attempted relative import with no known parent package";
+# `python -m` avoids that only because runpy imports the package and sets
+# __package__ first.
 #
 # CPython, the build environment, PyInstaller's scratch space and the frozen
 # tree all live in one mktemp directory that is deleted on exit, so the only
@@ -34,7 +38,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-APP_NAME="mlx-vlm-server"
+APP_NAME="junie-mlx-vlm"
 VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' mlx_vlm/version.py)"
 TARBALL="$SCRIPT_DIR/dist/$APP_NAME-$VERSION-macos-$(uname -m).tar.gz"
 PYTHON_VERSION=3.13
@@ -74,13 +78,20 @@ echo "Creating a throwaway build environment (Python $PYTHON_VERSION) ..."
 # mlx.core is a compiled extension; ask it where its lib/ lives rather than
 # assuming a site-packages layout.
 MLX_LIB_DIR="$("$PY" -c 'import mlx.core, pathlib; print(pathlib.Path(mlx.core.__file__).resolve().parent / "lib")')"
+MLX_JACCL="$MLX_LIB_DIR/libjaccl.dylib"
+if [ ! -f "$MLX_JACCL" ]; then
+  echo "ERROR: $MLX_JACCL is missing; mlx's library layout changed." >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Freeze. PyInstaller finds dependencies by following import statements from
 # the entry script -- including ones nested inside functions -- so cv2, scipy,
 # transformers, tokenizers, miniaudio and the rest need no flags at all, and
-# libmlx.dylib arrives too because it scans Mach-O load commands. What it
-# cannot see, and each flag below covers:
+# libmlx.dylib arrives too because it scans Mach-O load commands. The
+# dispatcher leans on the nested case: it imports the daemon and the worker
+# only inside the branch that runs them, and both halves still land here.
+# What it cannot see, and each flag below covers:
 #
 #   mlx._reprlib_fix is imported by mlx.core's C++ extension, from machine code
 #   where there is no bytecode to analyse. (The extension names five modules;
@@ -91,6 +102,15 @@ MLX_LIB_DIR="$("$PY" -c 'import mlx.core, pathlib; print(pathlib.Path(mlx.core._
 #   mlx.metallib is a 156 MB Metal shader library that libmlx.dylib opens at
 #   runtime by looking next to itself, so it must land in mlx/lib/ -- and being
 #   a data file, no import points at it.
+#
+#   libjaccl.dylib is a load command of libmlx.dylib, but written as
+#   @rpath/libjaccl.dylib while libmlx.dylib carries no LC_RPATH at all: the
+#   search path comes from core.cpython-313-darwin.so, one level up, whose
+#   @loader_path/lib covers both. Scanning libmlx.dylib on its own, PyInstaller
+#   cannot resolve that and leaves the library out, so `import mlx.core` in the
+#   bundle dies with "Library not loaded: @rpath/libjaccl.dylib". It goes to
+#   _internal/ rather than next to libmlx.dylib because that is where every
+#   rpath PyInstaller rewrote points.
 #
 #   Architectures, drafters, tool parsers and chat templates are resolved as
 #   importlib.import_module(f"...{name}") from strings that exist only once the
@@ -115,6 +135,7 @@ MLX_LIB_DIR="$("$PY" -c 'import mlx.core, pathlib; print(pathlib.Path(mlx.core._
   --paths "$SCRIPT_DIR" \
   --hidden-import mlx._reprlib_fix \
   --add-data "$MLX_LIB_DIR/mlx.metallib:mlx/lib" \
+  --add-binary "$MLX_JACCL:." \
   --collect-submodules mlx_vlm.models \
   --collect-submodules mlx_vlm.speculative \
   --collect-submodules mlx_vlm.tool_parsers \
@@ -122,7 +143,7 @@ MLX_LIB_DIR="$("$PY" -c 'import mlx.core, pathlib; print(pathlib.Path(mlx.core._
   --collect-submodules mlx_lm.tool_parsers \
   --collect-submodules mlx_lm.chat_templates \
   --copy-metadata llguidance \
-  mlx_vlm/server/__main__.py
+  mlx_vlm_gateway/cli.py
 
 # ---------------------------------------------------------------------------
 # Pack with tar, not zip: the tree contains symlinked dylibs that `zip -r`
@@ -143,10 +164,26 @@ mkdir -p "$CHECK_DIR"
 tar -xzf "$TARBALL" -C "$CHECK_DIR"
 APP="$CHECK_DIR/$APP_NAME"
 
-# Python itself: the interpreter is a shared library plus a zipped stdlib.
-for required in "$APP/_internal/base_library.zip" "$APP/_internal"/libpython*.dylib; do
-  [ -f "$required" ] || { echo "ERROR: no interpreter in the archive ($required)" >&2; exit 1; }
-  echo "Interpreter: $(basename "$required") ($(du -h "$required" | awk '{print $1}'))"
+# Python itself: the interpreter shared library plus a zipped stdlib. uv's
+# managed CPython is a framework build, so the library arrives as
+# Python.framework/Versions/<x.y>/Python; a plain build would leave a
+# libpython<x.y>.dylib instead, and either is a working interpreter.
+INTERPRETER=""
+for candidate in \
+  "$APP/_internal/Python.framework/Versions/$PYTHON_VERSION/Python" \
+  "$APP/_internal/libpython$PYTHON_VERSION.dylib"; do
+  if [ -f "$candidate" ]; then
+    INTERPRETER="$candidate"
+    break
+  fi
+done
+if [ -z "$INTERPRETER" ]; then
+  echo "ERROR: no interpreter library in the archive ($APP/_internal)" >&2
+  exit 1
+fi
+for required in "$INTERPRETER" "$APP/_internal/base_library.zip"; do
+  [ -f "$required" ] || { echo "ERROR: $required missing from the archive" >&2; exit 1; }
+  echo "Interpreter: ${required#"$APP/_internal/"} ($(du -h "$required" | awk '{print $1}'))"
 done
 
 # Dependencies that only load lazily never show up in a --help run, so check
@@ -157,10 +194,17 @@ for package in cv2 scipy llguidance PIL numpy transformers tokenizers hf_xet; do
 done
 echo "Bundled: cv2 scipy llguidance PIL numpy transformers tokenizers hf_xet"
 
-# And this imports the whole server stack -- fastapi, starlette, uvicorn, mlx,
-# mlx_lm, the tokenizer -- so a broken bundle fails here, not on delivery.
+# One --help per subcommand, because they import different halves of the
+# bundle: the daemon pulls fastapi, starlette, uvicorn and httpx, and only
+# the worker pulls mlx, mlx_lm, transformers and the tokenizer. Checking one
+# would let the other ship broken -- and the bare --help, answered by the
+# dispatcher itself, imports neither, so it only proves the entry point runs.
 "$APP/$APP_NAME" --help >/dev/null
-echo "Ran: $APP_NAME --help"
+echo "Ran: $APP_NAME --help (dispatcher)"
+"$APP/$APP_NAME" daemon --help >/dev/null
+echo "Ran: $APP_NAME daemon --help (fastapi, uvicorn)"
+"$APP/$APP_NAME" worker --help >/dev/null
+echo "Ran: $APP_NAME worker --help (mlx, transformers, tokenizer)"
 
 echo
 echo "Built $TARBALL"
@@ -170,6 +214,9 @@ shasum -a 256 "$TARBALL"
 echo
 echo "On the target Mac:"
 echo "  curl -fsSL <url>/$(basename "$TARBALL") | tar -xz -C <dir>"
-echo "  <dir>/$APP_NAME/$APP_NAME --host 0.0.0.0 --port 8085 --model <repo-id> ..."
+echo "  <dir>/$APP_NAME/$APP_NAME"
+echo "It takes no options; settings come from JUNIE_SERVER_CONFIG (default"
+echo "~/.local/share/junie-local/server-config.json), and the model weights"
+echo "named there must already be installed."
 echo "Browser-downloaded instead of curl'd? macOS SIGKILLs quarantined binaries:"
 echo "  xattr -dr com.apple.quarantine <dir>/$APP_NAME"
