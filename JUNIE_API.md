@@ -7,10 +7,11 @@ The gateway spawns the inference worker on the same `host` at `worker_port`
 The worker also watches its parent process and exits if the gateway crashes,
 so an orphan cannot keep model memory or port `19240` occupied.
 
-Start both through the single supported entrypoint:
+Start both through the single supported entrypoint — the frozen
+`junie-mlx-vlm` on a shipped machine, or from a checkout:
 
 ```bash
-./start.sh
+./start_dev.sh
 ```
 
 Use `./serverctl.sh` for lifecycle and settings commands. Except for
@@ -154,8 +155,8 @@ restart.
 
 `host` and `port` are launch settings rather than `/apply_settings` fields,
 because changing the gateway's own listening socket requires restarting the
-gateway. Stop it, edit the same `server-config.json`, and run `./start.sh`
-again. Startup fails with a clear error if either the requested public port or
+gateway. Stop it, edit the same `server-config.json`, and start it again.
+Startup fails with a clear error if either the requested public port or
 private worker port is already occupied.
 
 ## Shutdown and monitoring

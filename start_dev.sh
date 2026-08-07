@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One-command serve for the Junie local server.
+# Run the Junie local server from this checkout, for development.
 #
-# This script only prepares the Python environment and starts the daemon:
+# It only prepares the Python environment and starts the daemon:
 #   1) python venv -> created at ./.venv on first run
 #   2) daemon      -> python -m mlx_vlm_gateway
 #
@@ -12,6 +12,10 @@ set -euo pipefail
 # ~/.local/share/junie-local/server-config.json), serves the public API,
 # and spawns the inference worker itself. Model weights and the Junie
 # model descriptor are installed separately.
+#
+# Shipped machines run the frozen `junie-mlx-vlm` from
+# build_cli_tarball.sh instead, which needs none of this: it carries its
+# own interpreter and dependencies.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"

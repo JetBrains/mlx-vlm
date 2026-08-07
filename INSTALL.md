@@ -29,8 +29,13 @@ Restart Junie after either changes.
 ## 3. Start
 
 ```bash
-./start.sh
+./start_dev.sh
 ```
+
+This is the development entrypoint: it runs the server from this checkout.
+Shipped machines run the frozen `junie-mlx-vlm` from
+`build_cli_tarball.sh`, which carries its own interpreter and needs none of
+the setup below.
 
 Output goes to the screen **and** to `mlx_server.log` in the repo dir
 (gitignored, truncated on each start) — so after a problem you can always
@@ -52,7 +57,7 @@ new sessions warm-start — is **currently disabled** pending rework. Point
 `seed_request` at a chat-completions request body to turn it back on for one
 machine; nothing does so by default.
 
-The first run is a fast no-op after step 1, so `./start.sh` is also the
+The first run is a fast no-op after step 1, so `./start_dev.sh` is also the
 everyday start command. `Ctrl-C` stops both processes and releases the model
 memory.
 
@@ -131,8 +136,8 @@ See [JUNIE_API.md](JUNIE_API.md) for exact request and response formats.
 
 When the configured idle timeout expires, the gateway kills the worker and
 releases model memory. The next chat request starts a new worker, waits for the
-model to become ready, and then forwards that original request. The only
-supported process entrypoint remains `./start.sh`.
+model to become ready, and then forwards that original request. The daemon
+is the only supported process entrypoint; never start a worker beside it.
 
 Chat requests are batch-only; an incoming `stream: true` is changed to
 `false`. At `soft_request_timeout` seconds (270 by default) the worker cancels

@@ -23,7 +23,7 @@ elif command -v python3 >/dev/null 2>&1; then
 elif command -v python >/dev/null 2>&1; then
   PYTHON=python
 else
-  echo "ERROR: Python environment is missing; run ./start.sh first." >&2
+  echo "ERROR: Python environment is missing; run ./start_dev.sh first." >&2
   exit 1
 fi
 
@@ -138,7 +138,7 @@ command="${1:-}"
 [ $# -gt 0 ] && shift
 
 case "$command" in
-  start) exec "$SCRIPT_DIR/start.sh" ;;
+  start) exec "$SCRIPT_DIR/start_dev.sh" ;;
   status) get /status ;;
   wait) wait_ready ;;
   settings) get /current_settings ;;
