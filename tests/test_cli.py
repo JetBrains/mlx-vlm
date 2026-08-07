@@ -1,6 +1,8 @@
 import sys
 import types
 
+import pytest
+
 import mlx_vlm_gateway.cli as cli
 import mlx_vlm_gateway.supervisor as supervisor
 
@@ -27,16 +29,37 @@ def test_subcommands_dispatch_and_are_stripped(monkeypatch):
     monkeypatch.setattr(cli, "run_daemon", _record(calls, "daemon"))
     monkeypatch.setattr(cli, "run_worker", _record(calls, "worker"))
 
+    # --help after a subcommand belongs to that subcommand, not to us.
     cli.main(["daemon", "--help"])
-    cli.main(["worker"])
-    # Anything else stays an argument, so the daemon reports it as unknown.
-    cli.main(["--nonsense"])
+    cli.main(["worker", "--help"])
 
-    assert calls == [
-        ("daemon", ["--help"]),
-        ("worker", []),
-        ("daemon", ["--nonsense"]),
-    ]
+    assert calls == [("daemon", ["--help"]), ("worker", ["--help"])]
+
+
+def test_bare_help_is_answered_by_the_dispatcher(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(cli, "run_daemon", _record(calls, "daemon"))
+    monkeypatch.setattr(cli, "run_worker", _record(calls, "worker"))
+
+    with pytest.raises(SystemExit) as exit_code:
+        cli.main(["--help"])
+
+    assert exit_code.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "junie-mlx-vlm" in help_text
+    assert "daemon" in help_text and "worker" in help_text
+    # Answered here, so neither subcommand's stack gets imported for it.
+    assert calls == []
+
+
+def test_an_unknown_command_is_rejected(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "run_daemon", _record([], "daemon"))
+
+    for argv in (["nonsense"], ["--nonsense"]):
+        with pytest.raises(SystemExit) as exit_code:
+            cli.main(argv)
+        assert exit_code.value.code == 2
+    assert "junie-mlx-vlm" in capsys.readouterr().err
 
 
 def test_worker_runs_with_the_subcommand_removed_from_argv(monkeypatch):
