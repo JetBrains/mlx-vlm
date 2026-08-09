@@ -4,12 +4,11 @@ set -euo pipefail
 # Freeze mlx_vlm_gateway/cli.py into a self-contained tar.gz.
 #
 #   Output:  dist/junie-mlx-vlm-<version>-macos-arm64.tar.gz
-#   Run:     junie-mlx-vlm/junie-mlx-vlm
+#   Run:     junie-mlx-vlm/junie-mlx-vlm <mlx_vlm_gateway.cli args>
 #
-# The program takes no options: the daemon and the worker it spawns read
+# Neither subcommand takes options of its own: every setting comes from
 # JUNIE_SERVER_CONFIG. One executable serves both, because the daemon
-# re-invokes itself as `junie-mlx-vlm worker` -- a frozen build has no
-# interpreter to hand `-m` to.
+# re-invokes itself as `junie-mlx-vlm worker`.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -34,12 +33,6 @@ uv pip install --python "$PYTHON" . pyinstaller
 
 # mlx.core is a compiled extension; ask it for its lib directory.
 MLX_LIB_DIR="$("$PYTHON" -c 'import mlx.core, pathlib; print(pathlib.Path(mlx.core.__file__).resolve().parent / "lib")')"
-MLX_JACCL="$MLX_LIB_DIR/libjaccl.dylib"
-if [ ! -f "$MLX_JACCL" ]; then
-  echo "ERROR: $MLX_JACCL is missing; mlx's library layout changed." >&2
-  exit 1
-fi
-
 # PyInstaller follows every import statement, including those inside function
 # bodies. These are the dependencies it cannot see that way.
 HIDDEN_DEPS=(
@@ -52,10 +45,6 @@ HIDDEN_DEPS=(
   --hidden-import mlx._reprlib_fix
   # mlx: 162 MB shader library, opened at run time as data.
   --add-data "$MLX_LIB_DIR/mlx.metallib:mlx/lib"
-  # mlx: libmlx.dylib names @rpath/libjaccl.dylib but carries no LC_RPATH, so
-  # PyInstaller cannot resolve it and only warns. It goes to _internal/, where
-  # the rewritten rpaths point.
-  --add-binary "$MLX_JACCL:."
   # mlx-lm: importlib names from config keys; only reached for text-only models.
   --collect-submodules mlx_lm.models
   --collect-submodules mlx_lm.tool_parsers
@@ -76,9 +65,6 @@ pushd "$BUILD_DIR"
   "$SCRIPT_DIR/mlx_vlm_gateway/cli.py"
 popd
 
-# One --help per subcommand: they import different halves of the bundle, the
-# daemon fastapi/uvicorn and the worker mlx/transformers, while the bare --help
-# is answered by the dispatcher and imports neither.
 "$BUILD_DIR/dist/$NAME/$NAME" --help
 "$BUILD_DIR/dist/$NAME/$NAME" daemon --help
 "$BUILD_DIR/dist/$NAME/$NAME" worker --help
