@@ -71,13 +71,9 @@ popd
 # itself, so the archive root is where it belongs.
 install -m 755 "$SCRIPT_DIR/serverctl.sh" "$BUILD_DIR/dist/$NAME/serverctl.sh"
 
-# Read the output, not the status: with no command serverctl.sh prints usage
-# and exits 1.
-CTL_USAGE="$("$BUILD_DIR/dist/$NAME/serverctl.sh" 2>&1 || true)"
-case "$CTL_USAGE" in
-  *"./serverctl.sh start"*) ;;
-  *) echo "ERROR: serverctl.sh in the archive does not run" >&2; exit 1 ;;
-esac
+# serverctl.sh prints its usage and exits 1 when given no command, so read the
+# output rather than the status.
+{ "$BUILD_DIR/dist/$NAME/serverctl.sh" || true; } | grep -q "./serverctl.sh start"
 
 mkdir -p "$(dirname "$ARCHIVE")"
 tar -czf "$ARCHIVE" -C "$BUILD_DIR/dist" "$NAME"
