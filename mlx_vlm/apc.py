@@ -1523,6 +1523,38 @@ class DiskBlockStore:
                 best = (int(cache_hash), prefix_len)
         return best
 
+    def _supersede_exact_prefix(
+        self, new_hash: int, token_ids: Sequence[int], extra_hash: int
+    ) -> None:
+        """Drop an older exact snapshot that ``token_ids`` extends.
+
+        Growing sessions (each request's prompt a superset of the last) are
+        keyed by a hash of their own full token sequence, so without this
+        every intermediate snapshot in a chain would sit on disk forever
+        even though the newest one already contains it.
+        """
+        match = self.find_exact_prefix(token_ids, extra_hash=extra_hash)
+        if match is None:
+            return
+        old_hash, _prefix_len = match
+        if old_hash == new_hash:
+            return
+        with self._index_lock:
+            old_path = self._exact_index.pop(old_hash, None)
+        if old_path is None:
+            return
+        try:
+            size = old_path.stat().st_size
+            old_path.unlink()
+        except OSError:
+            return
+        self._disk_bytes = max(0, self._disk_bytes - size)
+        self.evictions += 1
+        logger.info(
+            "APC disk: superseded exact snapshot %s with a longer-prefix snapshot",
+            old_hash,
+        )
+
     def load_exact_cache(
         self,
         cache_hash: int,
@@ -2920,6 +2952,9 @@ class DiskBlockStore:
             pass
         with self._index_lock:
             self._exact_index[int(snapshot.cache_hash)] = path
+        self._supersede_exact_prefix(
+            int(snapshot.cache_hash), snapshot.token_ids, snapshot.extra_hash
+        )
         self._prune_exact_entries()
         self._maybe_evict()
         return [int(snapshot.cache_hash)]
