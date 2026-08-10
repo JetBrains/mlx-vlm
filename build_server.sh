@@ -23,7 +23,7 @@ PYTHON="$BUILD_DIR/.venv/bin/python"
 
 # uv installs a managed CPython: mlx needs 3.10+.
 UV_PYTHON_INSTALL_DIR="$BUILD_DIR/.python" \
-  uv venv --python 3.13 "$BUILD_DIR/.venv"
+  uv venv --managed-python --python 3.13 "$BUILD_DIR/.venv"
 
 # Install the checkout as a package: the frozen server imports mlx_vlm, and
 # pyproject.toml takes its dependency list from requirements.txt.
