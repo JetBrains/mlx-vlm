@@ -140,6 +140,23 @@ def apply_inference_env(cfg: dict) -> None:
     )
     set_or_unset("MLX_VLM_PIN_STABLE_PREFIX", pin_count if pin_count > 0 else None)
     set_or_unset("APC_DISK_EXACT_MAX", pin_count if pin_count > 0 else None)
+    # Growing conversations (each request a superset prefix of the last) get
+    # their own exact-cache disk snapshot, pooled separately from the pinned
+    # warm-start prefix above via APC_DISK_EXACT_SESSION_MAX — the disk tier
+    # supersedes a chain's older snapshot as it grows, so this caps distinct
+    # conversations, not snapshot files. Needs APC_DISK_EXACT_SCOPE=all,
+    # since the default "pinned" scope only ever persists the seed prefix.
+    session_count = (
+        int(cfg.get("apc_max_growing_sessions") or 0)
+        if cfg.get("apc_enabled")
+        else 0
+    )
+    set_or_unset(
+        "APC_DISK_EXACT_SCOPE", "all" if session_count > 0 else None
+    )
+    set_or_unset(
+        "APC_DISK_EXACT_SESSION_MAX", session_count if session_count > 0 else None
+    )
     disk_path = cfg.get("apc_disk_path") or os.path.join(
         os.path.dirname(config_path()), "apc-cache"
     )

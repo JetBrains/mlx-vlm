@@ -719,6 +719,7 @@ class _DiskExactCacheSnapshot:
     token_ids: Tuple[int, ...]
     extra_hash: int
     prompt_cache: List[Any]
+    pinned: bool = False
 
 
 @dataclass
@@ -1042,6 +1043,11 @@ class DiskBlockStore:
         self._index: dict[int, Tuple[Path, int]] = {}
         # exact full-prefix hash -> snapshot path
         self._exact_index: dict[int, Path] = {}
+        # subset of _exact_index keys whose snapshot was written as pinned
+        # (e.g. the shared stable-prefix warm-start entry) — these are
+        # pruned against a separate cap, and never touched by
+        # _supersede_exact_prefix's growing-session cleanup.
+        self._exact_pinned: set[int] = set()
         self._index_lock = threading.RLock()
         # Direct-read mode avoids mmap-backed MLX arrays entirely. It parses
         # safetensors headers, reads only the requested block's byte ranges
@@ -1061,6 +1067,15 @@ class DiskBlockStore:
         # launcher sets it from the pin_stable_prefix config.
         self._exact_max_entries = max(
             0, int(os.environ.get("APC_DISK_EXACT_MAX", "0"))
+        )
+        # Separate cap for growing-session snapshots (non-pinned exact
+        # entries), so they can't crowd out the pinned warm-start prefix
+        # (or vice versa) in a single shared LRU. 0 keeps the stock
+        # unbounded behavior. (Named distinctly from APCManager's
+        # _exact_session_max, which caps in-memory APCSession count for
+        # hybrid/SSM models — unrelated to this disk-tier cap.)
+        self._exact_disk_session_max = max(
+            0, int(os.environ.get("APC_DISK_EXACT_SESSION_MAX", "0"))
         )
         # Bounded LRU of parsed safetensors headers:
         # shard_path -> (tensor_entries, file_metadata, data_start).
@@ -1223,6 +1238,7 @@ class DiskBlockStore:
         with self._index_lock:
             self._index.clear()
             self._exact_index.clear()
+            self._exact_pinned.clear()
             for p in self.dir.glob(f"*{self.SUFFIX}"):
                 if not self._is_canonical_store_file(p):
                     continue
@@ -1244,6 +1260,8 @@ class DiskBlockStore:
                     except (TypeError, ValueError):
                         continue
                     self._exact_index[cache_hash] = p
+                    if metadata.get("pinned") == "1":
+                        self._exact_pinned.add(cache_hash)
                     continue
                 hashes_csv = metadata.get("block_hashes", "")
                 if not hashes_csv:
@@ -1441,40 +1459,68 @@ class DiskBlockStore:
             return cache_hash in self._in_flight
 
     def _prune_exact_entries(self) -> int:
-        """Drop the oldest exact snapshots beyond ``APC_DISK_EXACT_MAX``.
+        """Drop the oldest exact snapshots beyond their entry-count cap.
 
+        Pinned entries (the shared stable-prefix warm-start snapshot) and
+        growing-session entries are pruned as two independent pools —
+        against ``APC_DISK_EXACT_MAX`` and ``APC_DISK_EXACT_SESSION_MAX``
+        respectively — so neither can crowd the other out of its slots.
         Ordered by file mtime, which :meth:`load_exact_cache` refreshes on
         every successful restore — so "oldest" means least recently used,
         not least recently written.
         """
-        if self._exact_max_entries <= 0:
-            return 0
         dropped = 0
         with self._index_lock:
-            entries = []
+            pinned_entries = []
+            session_entries = []
             for cache_hash, path in self._exact_index.items():
                 try:
-                    entries.append((path.stat().st_mtime, cache_hash, path))
+                    mtime = path.stat().st_mtime
                 except OSError:
                     continue
-            entries.sort()
-            for _, cache_hash, path in entries[
-                : max(0, len(entries) - self._exact_max_entries)
-            ]:
+                bucket = (
+                    pinned_entries
+                    if cache_hash in self._exact_pinned
+                    else session_entries
+                )
+                bucket.append((mtime, cache_hash, path))
+            pinned_entries.sort()
+            session_entries.sort()
+
+            to_drop = []
+            if self._exact_max_entries > 0:
+                to_drop.extend(
+                    pinned_entries[
+                        : max(0, len(pinned_entries) - self._exact_max_entries)
+                    ]
+                )
+            if self._exact_disk_session_max > 0:
+                to_drop.extend(
+                    session_entries[
+                        : max(
+                            0,
+                            len(session_entries) - self._exact_disk_session_max,
+                        )
+                    ]
+                )
+
+            for _, cache_hash, path in to_drop:
                 try:
                     size = path.stat().st_size
                     path.unlink()
                 except OSError:
                     continue
                 self._exact_index.pop(cache_hash, None)
+                self._exact_pinned.discard(cache_hash)
                 self._disk_bytes = max(0, self._disk_bytes - size)
                 self.evictions += 1
                 dropped += 1
         if dropped:
             logger.info(
-                "APC disk: pruned %d exact snapshot(s) beyond the cap of %d",
+                "APC disk: pruned %d exact snapshot(s) beyond cap (pinned=%d, session=%d)",
                 dropped,
                 self._exact_max_entries,
+                self._exact_disk_session_max,
             )
         return dropped
 
@@ -1531,7 +1577,10 @@ class DiskBlockStore:
         Growing sessions (each request's prompt a superset of the last) are
         keyed by a hash of their own full token sequence, so without this
         every intermediate snapshot in a chain would sit on disk forever
-        even though the newest one already contains it.
+        even though the newest one already contains it. Never supersedes a
+        pinned entry (e.g. the shared stable-prefix warm-start snapshot) —
+        a growing session's tokens routinely start with that same shared
+        prefix, which would otherwise look like an old snapshot to replace.
         """
         match = self.find_exact_prefix(token_ids, extra_hash=extra_hash)
         if match is None:
@@ -1540,6 +1589,8 @@ class DiskBlockStore:
         if old_hash == new_hash:
             return
         with self._index_lock:
+            if old_hash in self._exact_pinned:
+                return
             old_path = self._exact_index.pop(old_hash, None)
         if old_path is None:
             return
@@ -2661,11 +2712,17 @@ class DiskBlockStore:
         token_ids: Sequence[int],
         extra_hash: int,
         prompt_cache: Sequence[Any],
+        pinned: bool = False,
     ) -> None:
         """Schedule an exact prompt-cache snapshot write.
 
         Exact snapshots are used for custom cache layouts that cannot be
-        reconstructed from independently concatenated K/V blocks.
+        reconstructed from independently concatenated K/V blocks. ``pinned``
+        entries (the shared stable-prefix warm-start snapshot) are pruned
+        against ``APC_DISK_EXACT_MAX`` independently of growing-session
+        snapshots, which are pruned against ``APC_DISK_EXACT_SESSION_MAX`` —
+        so a busy conversation can't evict the warm-start prefix, and vice
+        versa.
         """
         token_tuple = tuple(int(t) for t in token_ids)
         if not token_tuple or not prompt_cache:
@@ -2675,6 +2732,7 @@ class DiskBlockStore:
             token_ids=token_tuple,
             extra_hash=int(extra_hash),
             prompt_cache=list(prompt_cache),
+            pinned=bool(pinned),
         )
         self._enqueue_exact_snapshot(snapshot)
 
@@ -2933,6 +2991,7 @@ class DiskBlockStore:
             "token_ids": ",".join(str(int(t)) for t in snapshot.token_ids),
             "num_entries": str(len(snapshot.prompt_cache)),
             "store_id": self._exact_id_for(snapshot.cache_hash),
+            "pinned": "1" if snapshot.pinned else "0",
         }
         arrays: dict[str, mx.array] = {}
         for i, c in enumerate(snapshot.prompt_cache):
@@ -2952,9 +3011,14 @@ class DiskBlockStore:
             pass
         with self._index_lock:
             self._exact_index[int(snapshot.cache_hash)] = path
-        self._supersede_exact_prefix(
-            int(snapshot.cache_hash), snapshot.token_ids, snapshot.extra_hash
-        )
+            if snapshot.pinned:
+                self._exact_pinned.add(int(snapshot.cache_hash))
+            else:
+                self._exact_pinned.discard(int(snapshot.cache_hash))
+        if not snapshot.pinned:
+            self._supersede_exact_prefix(
+                int(snapshot.cache_hash), snapshot.token_ids, snapshot.extra_hash
+            )
         self._prune_exact_entries()
         self._maybe_evict()
         return [int(snapshot.cache_hash)]
@@ -3782,7 +3846,9 @@ class APCManager:
             pin_pending or self._disk_exact_scope == "all"
         ):
             try:
-                self.disk.save_exact_cache(key, token_tuple, extra_hash, copied)
+                self.disk.save_exact_cache(
+                    key, token_tuple, extra_hash, copied, pinned=pin_pending
+                )
                 with self.lock:
                     self.stats.disk_writes += 1
                 stored = True

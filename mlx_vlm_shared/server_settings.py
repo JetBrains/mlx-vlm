@@ -77,6 +77,18 @@ DEFAULT_CONFIG = {
     "apc_enabled": True,
     "apc_exact_sessions": 2,
     "apc_session_checkpoints": 4,
+    # How many growing conversations (each request a superset prefix of the
+    # last) keep an exact-cache snapshot on disk at once. Each chain's older
+    # snapshots are superseded by its newest one as it grows, so this caps
+    # distinct conversations, not total snapshot files. Pooled separately
+    # from "pin_stable_prefix" above, so a burst of session churn can't
+    # evict the shared warm-start prefix (or vice versa). 0 disables writing
+    # growing-session snapshots to disk at all.
+    "apc_max_growing_sessions": 5,
+    # null does not mean "no disk cache" — launch.py falls back to
+    # "apc-cache" next to this config file (see config_path()), so the
+    # disk tier is on by default. Set this only to relocate it, e.g. to a
+    # faster disk or a separate volume.
     "apc_disk_path": None,
     "ngram_max": 8,
     # Daemon-side supervisor tuning: how long to wait for the worker to
@@ -150,6 +162,7 @@ _VALIDATORS = {
     "apc_enabled": lambda value: isinstance(value, bool),
     "apc_exact_sessions": _is_int_in(0, 64),
     "apc_session_checkpoints": _is_int_in(1, 64),
+    "apc_max_growing_sessions": _is_int_in(0, 64),
     "apc_disk_path": lambda value: value is None or isinstance(value, str),
     "ngram_max": _is_int_in(1, 1024),
     "startup_timeout_s": _is_positive_number,
