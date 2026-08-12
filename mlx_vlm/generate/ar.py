@@ -1828,6 +1828,70 @@ class PromptProcessingBatch:
                     **store_kwargs,
                 )
                 meta[done_key] = True
+                meta["_last_store_len"] = max(
+                    int(meta.get("_last_store_len", 0) or 0), checkpoint_len
+                )
+
+    def harvest_partial_prefill(self) -> int:
+        """Snapshot every row's current prefill progress into the APC
+        exact cache. Called when a request is dropped mid-prefill (client
+        disconnect, soft timeout) so an identical retry resumes from here
+        instead of re-prefilling from scratch. Returns rows stored.
+        """
+        if (
+            self._apc_manager is None
+            or self._apc_mode != "exact"
+            or not self._apc_meta
+        ):
+            return 0
+        config = getattr(self.model, "config", None)
+        media_ids = (
+            _apc.multimodal_token_ids_from_config(config)
+            if config is not None
+            else set()
+        )
+        stored = 0
+        for batch_idx, meta in enumerate(self._apc_meta):
+            if meta is None:
+                continue
+            full_ids = meta.get("full_input_ids") or []
+            pos = self._row_real_tokens_processed(batch_idx)
+            prefix_len = int(meta.get("prefix_len", 0) or 0)
+            if (
+                pos <= prefix_len
+                or pos >= len(full_ids)
+                or pos <= int(meta.get("_last_store_len", 0) or 0)
+            ):
+                continue
+            # A prefix is only reusable if its suffix is media-free; skip
+            # positions that land inside a media token span.
+            if (
+                _apc.adjust_prefix_to_text_suffix_boundary(
+                    full_ids,
+                    pos,
+                    media_ids,
+                    max_prefix_tokens=len(full_ids) - 1,
+                )
+                != pos
+            ):
+                continue
+            prompt_cache = self._apc_prompt_cache_for_store(batch_idx)
+            if prompt_cache is None:
+                continue
+            if self._apc_manager.store_exact_cache(
+                full_ids[:pos],
+                prompt_cache,
+                extra_hash=meta.get("extra_hash", 0),
+            ):
+                stored += 1
+                meta["_last_store_len"] = pos
+                logger.info(
+                    "APC: stored partial-prefill snapshot at %d/%d tokens "
+                    "for cancelled request",
+                    pos,
+                    len(full_ids),
+                )
+        return stored
 
     def _prompt_kwargs_for_step(self, n: Optional[int] = None) -> dict:
         if n is None or not self._prompt_length_aware_keys:
@@ -2598,6 +2662,16 @@ class BatchGenerator:
             # Being prefilled
             if self._prompt_batch is not None and uid in self._prompt_batch.uids:
                 if len(self._prompt_batch.uids) == 1:
+                    # Keep the work done so far: an identical retry (the
+                    # common cause of a mid-prefill cancel is a client
+                    # timeout followed by a resend) resumes from this
+                    # snapshot instead of re-prefilling from scratch.
+                    try:
+                        self._prompt_batch.harvest_partial_prefill()
+                    except Exception as e:
+                        logger.warning(
+                            "APC partial-prefill snapshot on cancel failed: %s", e
+                        )
                     self._prompt_batch.uids = []
                     self._prompt_batch.prompt_cache = []
                     self._prompt_batch = None
