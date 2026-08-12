@@ -18,10 +18,17 @@ set -euo pipefail
 #                                           anything else as a JSON string
 #   ./serverctl.sh apply-json '{"max_context_length": 150000}'
 #   ./serverctl.sh stop                     POST /shutdown (graceful)
+#   ./serverctl.sh uninstall                stop the engine and remove everything
+#                                           install.sh set up: the install
+#                                           directory (engine, models, logs,
+#                                           config) and the Junie model config
+#                                           it wrote; only the default install
+#                                           path is supported
 #   ./serverctl.sh health | models | metrics | cache-stats | unload
 #
-# Everything but "start" is plain HTTP, so this drives a checkout and the
-# frozen junie-mlx-vlm alike. PORT overrides the port read from the config.
+# Everything but "start" and "uninstall" is plain HTTP, so this drives a
+# checkout and the frozen junie-mlx-vlm alike. PORT overrides the port read
+# from the config.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -135,6 +142,65 @@ start_server() {
   echo "Follow it with ./serverctl.sh wait"
 }
 
+# Undo what install.sh set up: stop the engine, remove the Junie model config
+# it wrote (clearing the default-model setting if it names that model), then
+# delete the install directory — engine versions, the current
+# symlink, models, logs and server-config.json. Deleting the tree this script
+# runs from is fine: the shell keeps its open file, and nothing here executes
+# from the tree afterwards.
+#
+# The rm -rf target is deliberately the spelled-out default install path and
+# nothing else — never a variable derived from the environment. With
+# JUNIE_SERVER_CONFIG pointing anywhere else this refuses to run rather than
+# guess which directory to delete.
+uninstall_all() {
+  if [ "$CONFIG_PATH" != "$HOME/.local/share/junie-local/server-config.json" ]; then
+    echo "ERROR: uninstall only supports the default install path." >&2
+    echo "       JUNIE_SERVER_CONFIG points at $CONFIG_PATH — unset it and" >&2
+    echo "       re-run, or remove that installation manually." >&2
+    exit 1
+  fi
+
+  # The exact model id install.sh writes the Junie config under.
+  junie_model_id="local-qwen3.6-27b-4bit"
+  junie_model_config="$HOME/.junie/models/$junie_model_id.json"
+  junie_settings="$HOME/.junie/settings.json"
+
+  # Stop the engine first, so nothing holds the port or writes to the tree.
+  if "${CURL[@]}" -o /dev/null -m 2 "$BASE/health" >/dev/null 2>&1; then
+    echo "Stopping the engine on port $PORT..."
+    "${CURL[@]}" -X POST -m 10 "$BASE/shutdown" >/dev/null 2>&1 || true
+  fi
+  waited=0
+  while [ "$waited" -lt 10 ] && pgrep -f junie-mlx-vlm >/dev/null 2>&1; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if pgrep -f junie-mlx-vlm >/dev/null 2>&1; then
+    echo "The engine did not stop in time; killing it."
+    pkill -f junie-mlx-vlm || true
+  fi
+
+  if [ -f "$junie_model_config" ]; then
+    echo "Removing Junie model config $junie_model_config"
+    rm -f "$junie_model_config"
+  fi
+  launch_model="$(plutil -extract modelForLaunch raw -o - -- "$junie_settings" 2>/dev/null || true)"
+  if [ "$launch_model" = "custom:$junie_model_id" ]; then
+    echo "Clearing default model custom:$junie_model_id in $junie_settings"
+    plutil -remove modelForLaunch "$junie_settings" 2>/dev/null || true
+  fi
+
+  if [ -d "$HOME/.local/share/junie-local" ]; then
+    echo "Removing $HOME/.local/share/junie-local (engine, models, logs, config)..."
+    rm -rf "$HOME/.local/share/junie-local"
+  else
+    echo "Nothing installed at $HOME/.local/share/junie-local."
+  fi
+
+  echo "Uninstall complete. Restart Junie to apply the changes."
+}
+
 wait_ready() {
   while :; do
     phase="$("${CURL[@]}" -m 5 "$BASE/status" 2>/dev/null \
@@ -168,6 +234,7 @@ case "$cmd" in
     post /apply_settings "$1"
     ;;
   stop) post /shutdown ;;
+  uninstall) uninstall_all ;;
   health) get /health ;;
   models) get /v1/models ;;
   metrics) get /metrics ;;
