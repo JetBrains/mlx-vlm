@@ -49,7 +49,7 @@ DEFAULT_CONFIG = {
     # clean id instead of a raw filesystem path.
     "models_dir": "~/.local/share/junie-local/models",
     "max_context_length": None,
-    "kv_quantization": True,
+    "kv_quantization": False,
     "auto_unload_time": 60,
     # Seconds after which the worker ends a single request cleanly, before
     # Junie's five-minute retry window. Keep it under the daemon's 275s hard
