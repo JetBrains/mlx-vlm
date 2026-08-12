@@ -989,6 +989,18 @@ async def metrics_endpoint(request: Request):
     return payload
 
 
+@app.get("/active_requests_stats")
+async def active_requests_stats_endpoint(request: Request):
+    """Return real-time progress of in-flight generation requests."""
+    _require_management_api_key(request)
+    if runtime.response_generator is None:
+        return {"active": []}
+    if not hasattr(runtime.response_generator, "get_active_requests_stats"):
+        return {"active": []}
+    active = runtime.response_generator.get_active_requests_stats()
+    return {"active": active}
+
+
 @app.get("/v1/cache/stats")
 @app.get("/cache/stats", include_in_schema=False)
 async def apc_cache_stats(request: Request):

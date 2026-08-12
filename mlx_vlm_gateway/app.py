@@ -208,7 +208,7 @@ def create_app(
     def settings_store(request: Request) -> SettingsStore:
         return request.app.state.settings_store
 
-    def status_payload(request: Request) -> dict:
+    def _status_payload_base(request: Request) -> dict:
         sup = supervisor(request)
         current = settings_store(request).current()
         if request.app.state.shutting_down:
@@ -246,7 +246,20 @@ def create_app(
     @app.get("/status")
     @app.get("/v1/status", include_in_schema=False)
     async def status(request: Request):
-        return status_payload(request)
+        payload = _status_payload_base(request)
+        sup = supervisor(request)
+        if sup.active_requests > 0 and sup.state == "ready":
+            try:
+                response = await request.app.state.client.get(
+                    f"{settings.worker_url}/active_requests_stats",
+                    timeout=settings.probe_timeout_s,
+                )
+                if response.status_code == 200:
+                    active = response.json().get("active", [])
+                    payload["inference"]["requests"] = active
+            except (httpx.RequestError, ValueError):
+                pass
+        return payload
 
     @app.get("/current_settings")
     @app.get("/v1/current_settings", include_in_schema=False)
@@ -310,7 +323,7 @@ def create_app(
                 }
 
             if sup.state in {"starting", "restarting", "stopping"}:
-                phase = status_payload(request)["phase"]
+                phase = _status_payload_base(request)["phase"]
                 raise HTTPException(
                     status_code=409,
                     detail=f"Server is busy (phase '{phase}'); retry once it settles.",

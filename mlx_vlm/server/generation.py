@@ -1146,6 +1146,8 @@ class ResponseGenerator:
         self._cancel_acks: dict = {}
         self._cancel_lock = Lock()
         self._tokenizer_lock = Lock()
+        self._active: dict = {}
+        self._active_lock = Lock()
         self._thread = Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -1156,6 +1158,71 @@ class ResponseGenerator:
 
     def is_alive(self) -> bool:
         return self._thread.is_alive()
+
+    def get_active_requests_stats(self) -> list[dict]:
+        """Return a snapshot of in-flight requests with generation progress.
+
+        Safe to call from any thread — acquires a lock briefly to copy
+        serializable fields from the GPU thread's ``active`` dict.
+        """
+        now = time.perf_counter()
+        with self._active_lock:
+            active_copy = dict(self._active)
+        result = []
+        for uid, info in active_copy.items():
+            request_id = info.get("request_id", uid)
+            generated_tokens = int(info.get("generated_tokens", 0) or 0)
+            prompt_tokens_total = int(info.get("prompt_tokens_total", 0) or 0)
+            prefill_processed = int(info.get("prefill_processed", 0) or 0)
+            decode_started_at = info.get("decode_started_at")
+            queued_at = float(info.get("queued_at", now) or now)
+            prefill_started_at = float(info.get("prefill_started_at", now) or now)
+            last_token_at = info.get("last_token_at")
+
+            cached_tokens = int(info.get("prefill_cached_tokens", 0) or 0)
+            new_prefill_tokens = max(0, prefill_processed - cached_tokens)
+
+            # Determine phase
+            if decode_started_at is not None:
+                phase = "decode"
+                elapsed = max(0.0, now - decode_started_at)
+                ttft = max(0.0, decode_started_at - queued_at)
+                # Compute decode rate from last_token_at if available
+                if last_token_at is not None and now > last_token_at and generated_tokens > 0:
+                    decode_rate = generated_tokens / (now - prefill_started_at)
+                elif elapsed > 0:
+                    first_chunk = int(info.get("decode_first_chunk_tokens", 0) or 0)
+                    measured = max(0, generated_tokens - first_chunk)
+                    decode_rate = measured / elapsed if elapsed > 0 else 0.0
+                else:
+                    decode_rate = 0.0
+                # Prefill speed: new tokens / prefill elapsed time
+                prefill_elapsed = max(0.0, decode_started_at - prefill_started_at)
+                prefill_speed = new_prefill_tokens / prefill_elapsed if prefill_elapsed > 0 else 0.0
+            else:
+                phase = "prefill"
+                elapsed = max(0.0, now - prefill_started_at)
+                ttft = None
+                decode_rate = 0.0
+                # Prefill speed during active prefill
+                prefill_elapsed = elapsed
+                prefill_speed = new_prefill_tokens / prefill_elapsed if prefill_elapsed > 0 else 0.0
+
+            entry = {
+                "request_id": request_id,
+                "phase": phase,
+                "prompt_tokens_total": prompt_tokens_total,
+                "prompt_tokens_processed": prefill_processed,
+                "prefill_cached_tokens": cached_tokens,
+                "generated_tokens": generated_tokens,
+                "prefill_speed_tok_s": round(prefill_speed, 1),
+                "decode_rate_tok_s": round(decode_rate, 1),
+                "elapsed_s": round(elapsed, 3),
+            }
+            if ttft is not None:
+                entry["ttft_s"] = round(ttft, 3)
+            result.append(entry)
+        return result
 
     def wait_until_ready(self, timeout: Optional[float] = None):
         if not self._ready.wait(timeout):
@@ -1376,6 +1443,8 @@ class ResponseGenerator:
             "queued_at": request.queued_at,
             "prefill_started_at": now,
             "prefill_processed": -1,
+            "prefill_cached_tokens": 0,
+            "prompt_tokens_total": request.prompt_tokens,
             "generated_tokens": 0,
             "decode_started_at": None,
             "last_token_at": None,
@@ -1420,6 +1489,7 @@ class ResponseGenerator:
             if processed <= int(info.get("prefill_processed", -1)):
                 continue
             info["prefill_processed"] = processed
+            info["prefill_cached_tokens"] = cached
             percent = 100.0 * processed / total if total > 0 else 100.0
             logger.info(
                 "Prefill progress: request=%s tokens=%d/%d (%.1f%%)",
@@ -1438,6 +1508,7 @@ class ResponseGenerator:
         if prompt_time <= 0 and prompt_tps > 0:
             prompt_time = prompt_tokens / prompt_tps
         info["prefill_processed"] = prompt_tokens
+        info["prefill_cached_tokens"] = cached_tokens
         logger.info(
             "Prefill completed: request=%s prompt_tokens=%d cached_tokens=%d "
             "elapsed=%.3fs rate=%.1f tok/s",
@@ -1880,8 +1951,8 @@ class ResponseGenerator:
         generation_stream = mx.default_stream(mx.default_device())
 
         batch_gen = None
-        # uid -> {rqueue, tokens, gen_kwargs}
-        active: dict = {}
+        # uid -> {rqueue, tokens, gen_kwargs} — shared with get_active_requests_stats()
+        active = self._active
 
         concurrency_limit = get_max_concurrent_requests()
 
@@ -2064,6 +2135,7 @@ class ResponseGenerator:
                     uid_counter += 1
                     uid = uid_counter
                     rqueue.put(GenerationContext(uid=uid, prompt_tokens=prompt_tokens))
+                    self._active[uid] = log_state
                     try:
                         self._generate_diffusion(
                             uid, rqueue, raw_inputs, args, cancelled, log_state
@@ -2076,6 +2148,8 @@ class ResponseGenerator:
                             rqueue.put(None)
                         except Exception:
                             pass
+                    finally:
+                        self._active.pop(uid, None)
                     mx.clear_cache()
             except Exception:
                 logger.exception("Error in diffusion generation thread")
@@ -2350,6 +2424,12 @@ class ResponseGenerator:
                         rqueues[uid].put(None)
                         finished_uids.add(uid)
 
+                # Publish into self._active so get_active_requests_stats() can
+                # snapshot speculative requests during their decode phase.
+                for uid in uids:
+                    if uid not in finished_uids:
+                        self._active[uid] = stream_infos[uid]
+
                 if len(finished_uids) == len(uids):
                     continue
 
@@ -2473,6 +2553,10 @@ class ResponseGenerator:
                             )
                         )
                         rqueues[uid].put(None)
+
+                # Remove speculative requests from the shared active dict
+                for uid in uids:
+                    self._active.pop(uid, None)
 
             except Exception as e:
                 logger.exception("Error in speculative generation thread: %s", e)
