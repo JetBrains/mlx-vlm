@@ -30,7 +30,7 @@ RESTART_SETTING_KEYS = {
 }
 
 DEFAULT_CONFIG = {
-    "model_name": "mlx-community/Qwen3.6-27B-4bit",
+    "model_name": "Qwen3.8-27B-MLX-4bit",
     # Multi-token-prediction speculative-decoding drafter for the model
     # above. It has no standalone language_model head, so it is only ever
     # served as the drafter, never requested directly as a chat "model".
@@ -41,12 +41,14 @@ DEFAULT_CONFIG = {
     # (2/4/5/6 are all slower) and the adaptive controller already handles
     # bursts. Per-request acceptance shows up in the log as
     # "Speculative decode: ... accepted_tokens_per_round=".
-    "draft_model": "mlx-community/Qwen3.6-27B-MTP-4bit",
+    "draft_model": "Qwen3.8-27B-MTP-MLX-4bit",
     "draft_kind": "mtp",
-    # Where both models are installed: a Hugging Face hub-style cache dir
-    # (models--org--name/snapshots/...) outside the default HF location.
-    # The worker loads by repo id from here, so "/v1/models" reports a
-    # clean id instead of a raw filesystem path.
+    # Where both models are installed, outside the default HF location.
+    # Either layout works: a plain directory named after the model (the
+    # Qwen3.8+ install layout, resolved by get_model_path via HF_HUB_CACHE)
+    # or a Hugging Face hub-style cache dir (models--org--name/snapshots/...)
+    # loaded by repo id. Both keep "/v1/models" reporting a clean id instead
+    # of a raw filesystem path.
     "models_dir": "~/.local/share/junie-local/models",
     "max_context_length": None,
     "kv_quantization": False,

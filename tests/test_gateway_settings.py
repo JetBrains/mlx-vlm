@@ -179,7 +179,7 @@ def test_settings_are_validated_once_and_then_read_from_memory(tmp_path):
         (
             {"model_name": "other-model"},
             "Model switching is not supported. Available model: "
-            "mlx-community/Qwen3.6-27B-4bit",
+            "Qwen3.8-27B-MLX-4bit",
         ),
         (
             {"max_context_length": 0},
@@ -205,7 +205,7 @@ def test_settings_validation_errors(body, message):
 def test_settings_validation_returns_updates_and_force():
     updates, force = SettingsStore(None).validate(
         {
-            "model_name": "  mlx-community/Qwen3.6-27B-4bit  ",
+            "model_name": "  Qwen3.8-27B-MLX-4bit  ",
             "max_context_length": None,
             "auto_unload_time": 600,
             "kv_quantization": False,
@@ -214,7 +214,7 @@ def test_settings_validation_returns_updates_and_force():
     )
 
     assert updates == {
-        "model_name": "mlx-community/Qwen3.6-27B-4bit",
+        "model_name": "Qwen3.8-27B-MLX-4bit",
         "max_context_length": None,
         "kv_quantization": False,
         "auto_unload_time": 600,

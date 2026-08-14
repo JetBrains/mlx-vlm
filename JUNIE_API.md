@@ -43,8 +43,8 @@ restarts the worker process, so a retry lands on a freshly loaded model.
   "uptime_s": 512.3,
   "model": {
     "loaded": true,
-    "id": "mlx-community/Qwen3.6-27B-4bit",
-    "draft_model": "mlx-community/Qwen3.6-27B-MTP-4bit",
+    "id": "Qwen3.8-27B-MLX-4bit",
+    "draft_model": "Qwen3.8-27B-MTP-MLX-4bit",
     "context_limit": null
   },
   "memory": {
@@ -86,7 +86,7 @@ auto-unloaded worker is represented as `phase: "ready"` with
 
 ```json
 {
-  "model_name": "mlx-community/Qwen3.6-27B-4bit",
+  "model_name": "Qwen3.8-27B-MLX-4bit",
   "max_context_length": null,
   "kv_quantization": true,
   "auto_unload_time": 600
@@ -104,7 +104,7 @@ auto-unloaded worker is represented as `phase: "ready"` with
 ```
 
 - `model_name`: informational; only the installed
-  `mlx-community/Qwen3.6-27B-4bit` value is accepted. Other values return
+  `Qwen3.8-27B-MLX-4bit` value is accepted. Other values return
   `400` without changing config or stopping the worker.
 - `max_context_length`: positive integer or `null`.
 - `kv_quantization`: boolean.
@@ -119,7 +119,7 @@ auto-unloaded worker is represented as `phase: "ready"` with
   "status": "applied",
   "changes": ["auto_unload_time"],
   "settings": {
-    "model_name": "mlx-community/Qwen3.6-27B-4bit",
+    "model_name": "Qwen3.8-27B-MLX-4bit",
     "max_context_length": null,
     "kv_quantization": true,
     "auto_unload_time": 600
@@ -133,7 +133,7 @@ worker process was launched:
 ```json
 {
   "status": "applying",
-  "model": "mlx-community/Qwen3.6-27B-4bit",
+  "model": "Qwen3.8-27B-MLX-4bit",
   "changes": ["kv_quantization", "max_context_length"],
   "message": "Model serving is restarting; poll GET /status until phase is 'ready'."
 }

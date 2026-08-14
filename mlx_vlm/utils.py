@@ -1,5 +1,6 @@
 import glob
 import importlib
+import os
 import inspect
 import json
 import logging
@@ -585,6 +586,13 @@ def get_model_path(
     """
     model_path = Path(path_or_hf_repo)
     if not model_path.exists():
+        # Models installed as plain directories (no hub-cache layout) under
+        # the configured cache dir are loadable by bare directory name.
+        hub_cache = os.environ.get("HF_HUB_CACHE")
+        if hub_cache:
+            local_path = Path(hub_cache).expanduser() / path_or_hf_repo
+            if local_path.exists():
+                return local_path
         model_path = Path(
             snapshot_download(
                 repo_id=path_or_hf_repo,

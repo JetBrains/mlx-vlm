@@ -477,7 +477,7 @@ def test_config_save_failure_keeps_worker_running(monkeypatch, tmp_path):
 
 
 def test_applying_current_settings_is_a_noop(monkeypatch, tmp_path):
-    model = "mlx-community/Qwen3.6-27B-4bit"
+    model = "Qwen3.8-27B-MLX-4bit"
     config_path = tmp_path / "server-config.json"
     current = {
         "model_name": model,
