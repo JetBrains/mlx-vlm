@@ -15,6 +15,10 @@ from mlx_vlm_shared.server_settings import CONFIG_PATH_ENV, DEFAULT_CONFIG
 
 logger = logging.getLogger("mlx_vlm.gateway")
 GATEWAY_PID_ENV = "MLX_VLM_GATEWAY_PID"
+# The worker already requires a bearer token on every endpoint when this is
+# set (mlx_vlm.server.app), so the key from the config file only has to
+# reach it as an env var, and be sent on every call the daemon makes.
+WORKER_API_KEY_ENV = "MLX_VLM_SERVER_API_KEY"
 
 DAEMON_SUBCOMMAND = "daemon"
 WORKER_SUBCOMMAND = "worker"
@@ -23,6 +27,11 @@ WORKER_SUBCOMMAND = "worker"
 # cli.py so that nothing imports the dispatcher, which would give the
 # "-m" run two copies of it.
 CLI_MODULE = "mlx_vlm_gateway.cli"
+
+
+def auth_headers(api_key: Optional[str]) -> dict:
+    """The header to send with a request, empty when no key is configured."""
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
 def worker_command() -> tuple[str, ...]:
@@ -65,6 +74,9 @@ class GatewaySettings:
     shutdown_timeout_s: float = DEFAULT_CONFIG["shutdown_timeout_s"]
     idle_check_interval_s: float = DEFAULT_CONFIG["idle_check_interval_s"]
     config_path: Optional[str] = None
+    # The key this daemon requires from its clients and presents to the
+    # worker it spawns; None leaves both sides open.
+    api_key: Optional[str] = None
 
 
 class WorkerSupervisor:
@@ -233,6 +245,13 @@ class WorkerSupervisor:
         # reads for itself.
         if self.settings.config_path:
             worker_env[CONFIG_PATH_ENV] = self.settings.config_path
+        # The worker enforces the same key on its private API, and reads it
+        # from the env; a config without one leaves that API open, so an
+        # inherited value must not linger.
+        if self.settings.api_key:
+            worker_env[WORKER_API_KEY_ENV] = self.settings.api_key
+        else:
+            worker_env.pop(WORKER_API_KEY_ENV, None)
         kwargs["env"] = worker_env
         if os.name != "nt":
             kwargs["start_new_session"] = True
@@ -293,6 +312,7 @@ class WorkerSupervisor:
             response = await self.client.get(
                 f"{self.settings.worker_url}/ready",
                 timeout=self.settings.probe_timeout_s,
+                headers=auth_headers(self.settings.api_key),
             )
         except httpx.RequestError as exc:
             self.last_error = str(exc)

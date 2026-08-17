@@ -1272,6 +1272,125 @@ def test_unload_during_restart_delay_prevents_worker_respawn(monkeypatch):
         assert len(processes) == 1
 
 
+def test_every_endpoint_requires_the_configured_api_key(monkeypatch):
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, _ = _gateway(monkeypatch, handler, api_key="secret-token")
+    with TestClient(app) as client:
+        for path in ("/status", "/current_settings", "/health", "/ready", "/models"):
+            missing = client.get(path)
+            invalid = client.get(
+                path, headers={"Authorization": "Bearer wrong-token"}
+            )
+            # The key alone, without the scheme, is not the header value.
+            unscheme = client.get(path, headers={"Authorization": "secret-token"})
+
+            assert missing.status_code == 401, path
+            assert invalid.status_code == 401, path
+            assert unscheme.status_code == 401, path
+            assert missing.json() == {"detail": "Invalid API key"}
+            assert missing.headers["WWW-Authenticate"] == "Bearer"
+
+        assert (
+            client.post("/v1/chat/completions", json={"messages": []}).status_code
+            == 401
+        )
+        assert client.post("/apply_settings", json={}).status_code == 401
+        assert client.post("/unload").status_code == 401
+        assert client.post("/shutdown").status_code == 401
+        # None of that reached the worker, and nothing was shut down.
+        assert app.state.supervisor.requests_forwarded == 0
+        assert app.state.shutting_down is False
+
+
+def test_the_configured_api_key_reaches_the_gateway_and_the_worker(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(
+        json.dumps({"model_name": DEFAULT_MODEL, "api_key": "secret-token"})
+    )
+    seen = {}
+
+    def handler(request):
+        seen[request.url.path] = request.headers.get("authorization")
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(200, json={"choices": []})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": []})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(
+        monkeypatch,
+        handler,
+        config_path=str(config_path),
+        api_key="secret-token",
+    )
+    auth = {"Authorization": "Bearer secret-token"}
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/ready", headers=auth).status_code == 200)
+
+        assert client.get("/status", headers=auth).status_code == 200
+        assert client.get("/models", headers=auth).status_code == 200
+        assert (
+            client.post(
+                "/v1/chat/completions", headers=auth, json={"messages": []}
+            ).status_code
+            == 200
+        )
+
+    # Every call the daemon makes to the worker carries the key, since the
+    # worker requires it too.
+    assert seen == {
+        "/ready": "Bearer secret-token",
+        "/v1/models": "Bearer secret-token",
+        "/v1/chat/completions": "Bearer secret-token",
+    }
+    # And the worker learns the key from the env the daemon spawned it with.
+    assert processes[0].spawn_kwargs["env"]["MLX_VLM_SERVER_API_KEY"] == "secret-token"
+
+
+def test_a_config_without_an_api_key_leaves_both_apis_open(monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen[request.url.path] = request.headers.get("authorization")
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler)
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/ready").status_code == 200)
+
+        assert client.get("/status").status_code == 200
+
+    assert seen == {"/ready": None}
+    assert "MLX_VLM_SERVER_API_KEY" not in processes[0].spawn_kwargs["env"]
+
+
+def test_worker_does_not_inherit_a_stale_api_key(monkeypatch):
+    # An operator's shell (or a previous install) may export the worker's key;
+    # the config file is the only thing that decides it.
+    monkeypatch.setenv("MLX_VLM_SERVER_API_KEY", "stale-token")
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler)
+    with TestClient(app):
+        _wait_until(lambda: bool(processes))
+
+    assert "MLX_VLM_SERVER_API_KEY" not in processes[0].spawn_kwargs["env"]
+
+
 def test_unknown_model_is_rejected_without_touching_the_worker(monkeypatch):
     def handler(request):
         if request.url.path == "/ready":

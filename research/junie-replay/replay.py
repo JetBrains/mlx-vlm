@@ -19,6 +19,9 @@ session/disk reuse for prefill, MTP + prompt-lookup speculation for decode.
 Usage (server must be running, e.g. via start.sh):
   python research/junie-replay/replay.py [--url http://localhost:8085]
       [--requests research/junie-replay/requests]
+
+A server started from a config with an "api_key" rejects requests without
+it; pass the same key in MLX_VLM_SERVER_API_KEY (bench.sh does it for you).
 """
 
 import argparse
@@ -33,10 +36,14 @@ def post(url, path):
         body = json.load(f)
     body["stream"] = False
     data = json.dumps(body).encode()
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get("MLX_VLM_SERVER_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
         f"{url}/v1/chat/completions",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=3600) as resp:
         return json.loads(resp.read())

@@ -64,6 +64,14 @@ DEFAULT_CONFIG = {
     "host": "127.0.0.1",
     "port": 19239,
     "worker_port": 19240,
+    # The bearer token the daemon requires on every request, and hands to
+    # the worker it spawns (MLX_VLM_SERVER_API_KEY, which the worker
+    # already requires on every endpoint): install.sh generates one per
+    # machine and writes it here. null leaves both APIs open, which is what
+    # a checkout that never ran install.sh gets. Changing it needs a
+    # restart, like "host" and "port", so it is not an /apply_settings
+    # field.
+    "api_key": None,
     "int8_prefill": True,
     "prefill_step_size": 1024,
     "preserve_thinking": True,
@@ -164,6 +172,9 @@ _VALIDATORS = {
     "host": lambda value: isinstance(value, str) and bool(value.strip()),
     "port": _is_int_in(1, 65535),
     "worker_port": _is_int_in(1, 65535),
+    "api_key": lambda value: (
+        value is None or (isinstance(value, str) and bool(value.strip()))
+    ),
     "int8_prefill": lambda value: isinstance(value, bool),
     "prefill_step_size": _is_int_in(1, 1 << 20),
     "preserve_thinking": lambda value: isinstance(value, bool),

@@ -102,6 +102,31 @@ def test_daemon_refuses_a_worker_port_that_collides_with_the_public_one(tmp_path
         build_settings(str(tmp_path / "server-config.json"), config)
 
 
+def test_api_key_is_a_launch_setting_read_from_the_config(tmp_path):
+    path = str(tmp_path / "server-config.json")
+
+    settings = build_settings(path, {**DEFAULT_CONFIG, "api_key": "sk-secret"})
+
+    assert settings.api_key == "sk-secret"
+    # A config without one leaves both APIs open.
+    assert build_settings(path, DEFAULT_CONFIG).api_key is None
+
+
+def test_api_key_survives_settings_changes_but_cannot_be_changed_over_http(tmp_path):
+    path = tmp_path / "server-config.json"
+    path.write_text(json.dumps({"model_name": "old-model", "api_key": "sk-secret"}))
+    store = SettingsStore(str(path))
+
+    # Changing the key means restarting the daemon that listens with it, so
+    # it is not an /apply_settings field — like "host" and "port".
+    with pytest.raises(SettingsValidationError, match=r"\['api_key'\]"):
+        store.validate({"api_key": "sk-other"})
+
+    store.save({"model_name": "Qwen3.8-27B-MLX-4bit"})
+
+    assert json.loads(path.read_text())["api_key"] == "sk-secret"
+
+
 def test_gateway_creates_missing_config_with_defaults(tmp_path):
     path = tmp_path / "server-config.json"
 

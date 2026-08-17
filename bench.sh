@@ -20,7 +20,9 @@ if [ ! -x "$PYTHON_BIN" ]; then
 fi
 
 CONFIG_PATH="$HOME/.local/share/junie-local/server-config.json"
-CONFIG_PORT=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" - "$CONFIG_PATH" <<'PY'
+# Port on the first line, api_key (empty when the config has none) on the
+# second: one interpreter start for both.
+CONFIG_VALUES=$(PYTHONPATH="$SCRIPT_DIR" "$PYTHON_BIN" - "$CONFIG_PATH" <<'PY'
 import json
 import sys
 
@@ -36,11 +38,19 @@ except (OSError, ValueError):
 
 config, _ = normalize_config(raw)
 print(config["port"])
+print(config["api_key"] or "")
 PY
 )
-PORT="${PORT:-$CONFIG_PORT}"
+PORT="${PORT:-$(printf '%s\n' "$CONFIG_VALUES" | sed -n 1p)}"
+# Both the daemon and the worker reject requests without this key when the
+# config has one; replay.py picks it up from the environment.
+export MLX_VLM_SERVER_API_KEY="${MLX_VLM_SERVER_API_KEY:-$(printf '%s\n' "$CONFIG_VALUES" | sed -n 2p)}"
 
-if ! curl -sf -m 5 "http://localhost:$PORT/health" > /dev/null 2>&1; then
+HEALTH_CURL=(curl -sf -m 5)
+if [ -n "$MLX_VLM_SERVER_API_KEY" ]; then
+  HEALTH_CURL+=(-H "Authorization: Bearer $MLX_VLM_SERVER_API_KEY")
+fi
+if ! "${HEALTH_CURL[@]}" "http://localhost:$PORT/health" > /dev/null 2>&1; then
   echo "Server is not running on port $PORT."
   echo "Start it first:  ./serverctl.sh start"
   exit 1

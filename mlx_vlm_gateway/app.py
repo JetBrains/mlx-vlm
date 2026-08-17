@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import logging
 import os
+import secrets
 import signal
 import time
 from contextlib import asynccontextmanager
@@ -9,7 +10,7 @@ from typing import Callable, Optional, Sequence
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from mlx_vlm_shared.errors import (
@@ -40,7 +41,12 @@ from .memory_monitor import (
     read_memory_sample,
 )
 from .settings import RESTART_SETTING_KEYS, SettingsStore, SettingsValidationError
-from .supervisor import GatewaySettings, WorkerSupervisor, worker_command
+from .supervisor import (
+    GatewaySettings,
+    WorkerSupervisor,
+    auth_headers,
+    worker_command,
+)
 
 
 logger = logging.getLogger("mlx_vlm.gateway")
@@ -113,6 +119,28 @@ def create_app(
     memory_sampler: Optional[Callable[[Optional[int]], MemorySample]] = None,
 ) -> FastAPI:
     sample_memory = memory_sampler or read_memory_sample
+    # Sent on every call to the worker, which requires the same key; empty
+    # when the config has none.
+    worker_auth = auth_headers(settings.api_key)
+
+    def require_api_key(request: Request) -> None:
+        """Reject any request that does not carry the configured key.
+
+        Applied to the whole app rather than per route, so a new endpoint
+        cannot be added unauthenticated by omission. A config without an
+        "api_key" leaves the API open, which is what a checkout gets.
+        """
+        if not settings.api_key:
+            return
+        # compare_digest, so a wrong key cannot be guessed byte by byte
+        # from how long the comparison takes.
+        supplied = request.headers.get("Authorization", "")
+        if not secrets.compare_digest(supplied, f"Bearer {settings.api_key}"):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
     async def record_recent_memory(app: FastAPI) -> None:
         while True:
@@ -201,7 +229,11 @@ def create_app(
             await supervisor.close()
             await client.aclose()
 
-    app = FastAPI(title="MLX-VLM Gateway", lifespan=lifespan)
+    app = FastAPI(
+        title="MLX-VLM Gateway",
+        lifespan=lifespan,
+        dependencies=[Depends(require_api_key)],
+    )
 
     def supervisor(request: Request) -> WorkerSupervisor:
         return request.app.state.supervisor
@@ -254,6 +286,7 @@ def create_app(
                 response = await request.app.state.client.get(
                     f"{settings.worker_url}/active_requests_stats",
                     timeout=settings.probe_timeout_s,
+                    headers=worker_auth,
                 )
                 if response.status_code == 200:
                     active = response.json().get("active", [])
@@ -361,6 +394,7 @@ def create_app(
                 response = await request.app.state.client.get(
                     f"{settings.worker_url}/health",
                     timeout=settings.probe_timeout_s,
+                    headers=worker_auth,
                 )
                 if response.status_code == 200:
                     return JSONResponse(response.json())
@@ -393,7 +427,7 @@ def create_app(
         worker_generation = sup.generation
         try:
             response = await request.app.state.client.request(
-                method, f"{settings.worker_url}{path}"
+                method, f"{settings.worker_url}{path}", headers=worker_auth
             )
         except httpx.RequestError as exc:
             sup.schedule_restart(
@@ -541,7 +575,7 @@ def create_app(
                 },
             )
         payload["stream"] = False
-        headers = {"content-type": "application/json"}
+        headers = {"content-type": "application/json", **worker_auth}
         for name in ("x-apc-tenant", "x-tenant-id"):
             if value := request.headers.get(name):
                 headers[name] = value
@@ -806,6 +840,7 @@ def build_settings(path: str, config: dict) -> GatewaySettings:
         restart_delay_s=config["restart_delay_s"],
         shutdown_timeout_s=config["shutdown_timeout_s"],
         idle_check_interval_s=config["idle_check_interval_s"],
+        api_key=config.get("api_key"),
     )
 
 
@@ -832,6 +867,14 @@ def main(argv: Optional[Sequence[str]] = None):
         "Worker log: %s (previous run kept as %s.0)",
         settings.worker_log_path,
         settings.worker_log_path,
+    )
+    logger.info(
+        "API key: %s",
+        (
+            "required on every request"
+            if settings.api_key
+            else 'not set ("api_key" in the config); the API is open'
+        ),
     )
     server = None
 

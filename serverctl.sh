@@ -28,7 +28,7 @@ set -euo pipefail
 #
 # Everything but "start" and "uninstall" is plain HTTP, so this drives a
 # checkout and the frozen junie-mlx-vlm alike. PORT overrides the port read
-# from the config.
+# from the config, API_KEY the api_key read from it.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -45,6 +45,14 @@ case "$PORT" in
 esac
 BASE="http://localhost:$PORT"
 
+# The bearer token both the daemon and the worker require on every request,
+# read from the same file the same way -- install.sh generates one per
+# machine and writes it there. Empty covers all the cases that mean "send no
+# header": a config with "api_key": null (a checkout that never ran
+# install.sh, whose API is open), a config without the key at all, and no
+# config yet.
+API_KEY="${API_KEY:-$(plutil -extract api_key raw -o - -- "$CONFIG_PATH" 2>/dev/null || true)}"
+
 # The daemon's own output, beside the worker log it writes itself.
 DAEMON_LOG="${CONFIG_PATH%/*}/junie-mlx-vlm-daemon.log"
 
@@ -54,6 +62,9 @@ usage() {
 }
 
 CURL=(curl -sS --fail-with-body -m 30)
+if [ -n "$API_KEY" ]; then
+  CURL+=(-H "Authorization: Bearer $API_KEY")
+fi
 
 # plutil reprints JSON but sorts the keys, and refuses anything that is not a
 # plist or JSON -- so fall back to the raw body, since an error page is still
