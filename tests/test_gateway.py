@@ -13,6 +13,9 @@ import mlx_vlm_gateway.supervisor as supervisor_module
 from mlx_vlm_gateway.app import GatewaySettings, create_app
 from mlx_vlm_gateway.memory_monitor import MemorySample
 from mlx_vlm_gateway.supervisor import GATEWAY_PID_ENV
+from mlx_vlm_shared.server_settings import SUPPORTED_MODELS
+
+DEFAULT_MODEL, OTHER_MODEL = list(SUPPORTED_MODELS)[:2]
 
 
 class FakeProcess:
@@ -209,11 +212,11 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
         assert client.post("/stop_worker").status_code == 404
         response = client.post(
             "/v1/chat/completions",
-            json={"model": "any-model", "messages": [], "stream": True},
+            json={"model": DEFAULT_MODEL, "messages": [], "stream": True},
         )
         assert response.status_code == 200
         assert response.json()["timings"]["generation_tps"] == 42.0
-        assert captured == [{"model": "any-model", "messages": [], "stream": False}]
+        assert captured == [{"model": DEFAULT_MODEL, "messages": [], "stream": False}]
 
         metrics = client.get("/metrics").json()
         assert metrics["requests"]["completed"] == 1
@@ -1267,3 +1270,115 @@ def test_unload_during_restart_delay_prevents_worker_respawn(monkeypatch):
         assert app.state.supervisor.desired_running is False
         time.sleep(0.15)
         assert len(processes) == 1
+
+
+def test_unknown_model_is_rejected_without_touching_the_worker(monkeypatch):
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler)
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/ready").status_code == 200)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "no-such-model", "messages": []},
+        )
+
+        assert response.status_code == 404
+        error = response.json()["error"]
+        assert error["code"] == "model_not_found"
+        assert DEFAULT_MODEL in error["message"]
+        assert OTHER_MODEL in error["message"]
+        assert len(processes) == 1
+        assert app.state.supervisor.requests_forwarded == 0
+
+
+def test_request_for_other_model_reloads_idle_worker(monkeypatch, tmp_path):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(json.dumps({"model_name": DEFAULT_MODEL}))
+    captured = []
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": []})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/ready").status_code == 200)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": OTHER_MODEL, "messages": []},
+        )
+
+        assert response.status_code == 200
+        assert captured == [
+            {"model": OTHER_MODEL, "messages": [], "stream": False}
+        ]
+        # The worker serving the old model was stopped and a new one spawned.
+        assert len(processes) == 2
+        persisted = json.loads(config_path.read_text())
+        assert persisted["model_name"] == OTHER_MODEL
+        assert persisted["draft_model"] == SUPPORTED_MODELS[OTHER_MODEL]
+        assert client.get("/status").json()["model"]["id"] == OTHER_MODEL
+
+
+def test_request_for_other_model_is_rejected_while_worker_is_busy(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(json.dumps({"model_name": DEFAULT_MODEL}))
+    release = threading.Event()
+
+    async def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            return httpx.Response(200, json={"choices": []})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(
+        monkeypatch,
+        handler,
+        config_path=str(config_path),
+        request_timeout_s=5.0,
+    )
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/ready").status_code == 200)
+        result = {}
+
+        def busy_request():
+            result["response"] = client.post(
+                "/v1/chat/completions",
+                json={"model": DEFAULT_MODEL, "messages": []},
+            )
+
+        thread = threading.Thread(target=busy_request)
+        thread.start()
+        try:
+            _wait_until(lambda: app.state.supervisor.active_requests == 1)
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": OTHER_MODEL, "messages": []},
+            )
+        finally:
+            release.set()
+            thread.join(timeout=2.0)
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert OTHER_MODEL in detail
+        assert DEFAULT_MODEL in detail
+        assert result["response"].status_code == 200
+        # No reload happened and the configured model was left alone.
+        assert len(processes) == 1
+        assert json.loads(config_path.read_text())["model_name"] == DEFAULT_MODEL

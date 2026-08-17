@@ -23,6 +23,7 @@ from mlx_vlm_shared.errors import (
 from mlx_vlm_shared.server_settings import (
     CONFIG_PATH_ENV,
     DEFAULT_CONFIG_PATH,
+    SUPPORTED_MODELS,
     config_path,
     load_config,
 )
@@ -514,6 +515,31 @@ def create_app(
             raise HTTPException(
                 status_code=400, detail="Request body must be a JSON object"
             )
+        # Requests may name either supported model; the worker serves one at
+        # a time, so a different supported model means reloading the worker
+        # (below). The configured model is also accepted even when it is not
+        # in the supported list, e.g. a custom model set in the config file.
+        # An absent model field means "whatever is configured".
+        requested_model = payload.get("model")
+        store = settings_store(request)
+        if (
+            requested_model
+            and requested_model not in SUPPORTED_MODELS
+            and requested_model != store.current()["model_name"]
+        ):
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": {
+                        "message": (
+                            f"Model '{requested_model}' not found. Available "
+                            f"models: {', '.join(SUPPORTED_MODELS)}."
+                        ),
+                        "type": "invalid_request_error",
+                        "code": "model_not_found",
+                    }
+                },
+            )
         payload["stream"] = False
         headers = {"content-type": "application/json"}
         for name in ("x-apc-tenant", "x-tenant-id"):
@@ -534,7 +560,41 @@ def create_app(
                                 "'stopping'."
                             ),
                         )
-                    if sup.state != "ready":
+                    current_model = store.current()["model_name"]
+                    if requested_model and requested_model != current_model:
+                        # Deliberately simple: a busy worker is not swapped
+                        # out from under its in-flight request(s); the other
+                        # model is just unavailable until the worker is free.
+                        # (This request itself is already counted, hence > 1.)
+                        if sup.active_requests > 1:
+                            raise HTTPException(
+                                status_code=409,
+                                detail=(
+                                    f"Model '{requested_model}' is not "
+                                    f"available right now: '{current_model}' "
+                                    "is loaded and serving requests. Retry "
+                                    "once it is idle."
+                                ),
+                            )
+                        logger.info(
+                            "Request for model %s; reloading worker (was %s).",
+                            requested_model,
+                            current_model,
+                        )
+                        try:
+                            store.save({"model_name": requested_model})
+                        except OSError as exc:
+                            logger.error("Failed to save settings: %s", exc)
+                            raise HTTPException(
+                                status_code=500,
+                                detail=(
+                                    "Failed to save settings; worker state "
+                                    "was not changed."
+                                ),
+                            ) from exc
+                        await sup.stop_worker()
+                        await sup.start_worker(wait_ready=False)
+                    elif sup.state != "ready":
                         await sup.start_worker(wait_ready=False)
 
                 if sup.state != "ready":

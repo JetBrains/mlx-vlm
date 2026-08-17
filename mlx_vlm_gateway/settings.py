@@ -10,6 +10,7 @@ from mlx_vlm_shared.server_settings import (
     DEFAULT_PUBLIC_SETTINGS,
     PUBLIC_SETTING_KEYS,
     RESTART_SETTING_KEYS,
+    SUPPORTED_MODELS,
     is_valid_setting,
     normalize_config,
 )
@@ -117,10 +118,10 @@ class SettingsStore:
                     '"model_name" must be a non-empty string.'
                 )
             updates["model_name"] = value.strip()
-            if updates["model_name"] != DEFAULT_PUBLIC_SETTINGS["model_name"]:
+            if updates["model_name"] not in SUPPORTED_MODELS:
                 raise SettingsValidationError(
-                    "Model switching is not supported. Available model: "
-                    f"{DEFAULT_PUBLIC_SETTINGS['model_name']}"
+                    "Unsupported model. Available models: "
+                    f"{', '.join(SUPPORTED_MODELS)}"
                 )
 
         for key in ("max_context_length", "auto_unload_time"):
@@ -136,6 +137,12 @@ class SettingsStore:
         return updates, force
 
     def save(self, updates: dict) -> dict:
+        # A supported model always runs with its paired drafter; switching
+        # one without the other would feed the verify pass a mismatched MTP
+        # head.
+        drafter = SUPPORTED_MODELS.get(updates.get("model_name"))
+        if drafter is not None and "draft_model" not in updates:
+            updates = {**updates, "draft_model": drafter}
         config, invalid = normalize_config({**self._config, **updates})
         if invalid:
             raise SettingsValidationError(f"Invalid settings: {sorted(invalid)}")

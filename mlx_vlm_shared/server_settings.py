@@ -30,7 +30,7 @@ RESTART_SETTING_KEYS = {
 }
 
 DEFAULT_CONFIG = {
-    "model_name": "Qwen3.8-27B-MLX-4bit",
+    "model_name": "Qwen3.6-27B-MLX-4bit",
     # Multi-token-prediction speculative-decoding drafter for the model
     # above. It has no standalone language_model head, so it is only ever
     # served as the drafter, never requested directly as a chat "model".
@@ -41,7 +41,7 @@ DEFAULT_CONFIG = {
     # (2/4/5/6 are all slower) and the adaptive controller already handles
     # bursts. Per-request acceptance shows up in the log as
     # "Speculative decode: ... accepted_tokens_per_round=".
-    "draft_model": "Qwen3.8-27B-MTP-MLX-4bit",
+    "draft_model": "Qwen3.6-27B-MTP-MLX-4bit",
     "draft_kind": "mtp",
     # Where both models are installed, outside the default HF location.
     # Either layout works: a plain directory named after the model (the
@@ -113,6 +113,14 @@ DEFAULT_CONFIG = {
 
 DEFAULT_PUBLIC_SETTINGS = {key: DEFAULT_CONFIG[key] for key in PUBLIC_SETTING_KEYS}
 DEFAULT_DRAFT_MODEL = DEFAULT_CONFIG["draft_model"]
+
+# The models the server can serve, each paired with its MTP drafter. Both
+# live in "models_dir" with the same layout. A chat request naming one of
+# these gets the worker (re)loaded with it; any other name is rejected.
+SUPPORTED_MODELS = {
+    "Qwen3.6-27B-MLX-4bit": "Qwen3.6-27B-MTP-MLX-4bit",
+    "Qwen3.8-27B-MLX-4bit": "Qwen3.8-27B-MTP-MLX-4bit",
+}
 
 
 def _is_positive_int_or_none(value) -> bool:

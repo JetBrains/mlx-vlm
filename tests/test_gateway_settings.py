@@ -178,8 +178,8 @@ def test_settings_are_validated_once_and_then_read_from_memory(tmp_path):
         ({"model_name": ""}, '"model_name" must be a non-empty string.'),
         (
             {"model_name": "other-model"},
-            "Model switching is not supported. Available model: "
-            "Qwen3.8-27B-MLX-4bit",
+            "Unsupported model. Available models: "
+            "Qwen3.6-27B-MLX-4bit, Qwen3.8-27B-MLX-4bit",
         ),
         (
             {"max_context_length": 0},
@@ -220,3 +220,16 @@ def test_settings_validation_returns_updates_and_force():
         "auto_unload_time": 600,
     }
     assert force is True
+
+
+def test_saving_a_supported_model_switches_its_drafter_too(tmp_path):
+    path = tmp_path / "server-config.json"
+    store = SettingsStore(str(path))
+    assert store.current()["model_name"] == "Qwen3.6-27B-MLX-4bit"
+
+    updates, _ = store.validate({"model_name": "Qwen3.8-27B-MLX-4bit"})
+    settings = store.save(updates)
+
+    assert settings["model_name"] == "Qwen3.8-27B-MLX-4bit"
+    persisted = json.loads(path.read_text())
+    assert persisted["draft_model"] == "Qwen3.8-27B-MTP-MLX-4bit"

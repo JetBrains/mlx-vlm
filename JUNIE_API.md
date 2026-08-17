@@ -24,6 +24,20 @@ The gateway always forwards it as a non-streaming request. If the worker was
 stopped by the idle timeout, the gateway starts it, waits until it is ready,
 and then forwards the same request.
 
+The request's `model` field selects between the installed models
+(`Qwen3.6-27B-MLX-4bit` and `Qwen3.8-27B-MLX-4bit`); omitting it uses
+whichever model is currently configured. One model is served at a time:
+
+- Requested model is loaded (or the worker is stopped): the request is
+  served, starting or reloading the worker if needed. Switching models
+  restarts the worker process and persists the new `model_name` (and its
+  paired drafter) to `server-config.json`.
+- Requested model differs and requests are in flight: `409` — e.g.
+  `"Model 'Qwen3.6-…' is not available right now: 'Qwen3.8-…' is loaded
+  and serving requests. Retry once it is idle."`
+- Unknown model: `404` with error code `model_not_found`, without touching
+  the worker.
+
 Corrupted-generation bandage: if the model emits a long run of token id 0
 ("!", the argmax of zeroed/NaN logits — the signature of corrupted serving
 state), the worker fails the request with HTTP 508 (a private
@@ -43,8 +57,8 @@ restarts the worker process, so a retry lands on a freshly loaded model.
   "uptime_s": 512.3,
   "model": {
     "loaded": true,
-    "id": "Qwen3.8-27B-MLX-4bit",
-    "draft_model": "Qwen3.8-27B-MTP-MLX-4bit",
+    "id": "Qwen3.6-27B-MLX-4bit",
+    "draft_model": "Qwen3.6-27B-MTP-MLX-4bit",
     "context_limit": null
   },
   "memory": {
@@ -86,7 +100,7 @@ auto-unloaded worker is represented as `phase: "ready"` with
 
 ```json
 {
-  "model_name": "Qwen3.8-27B-MLX-4bit",
+  "model_name": "Qwen3.6-27B-MLX-4bit",
   "max_context_length": null,
   "kv_quantization": true,
   "auto_unload_time": 600
@@ -103,9 +117,10 @@ auto-unloaded worker is represented as `phase: "ready"` with
 }
 ```
 
-- `model_name`: informational; only the installed
-  `Qwen3.8-27B-MLX-4bit` value is accepted. Other values return
-  `400` without changing config or stopping the worker.
+- `model_name`: one of the installed models, `Qwen3.6-27B-MLX-4bit`
+  (default) or `Qwen3.8-27B-MLX-4bit`; switching also switches to the
+  model's paired drafter. Other values return `400` without changing
+  config or stopping the worker.
 - `max_context_length`: positive integer or `null`.
 - `kv_quantization`: boolean.
 - `auto_unload_time`: positive integer seconds or `null` to disable.
@@ -119,7 +134,7 @@ auto-unloaded worker is represented as `phase: "ready"` with
   "status": "applied",
   "changes": ["auto_unload_time"],
   "settings": {
-    "model_name": "Qwen3.8-27B-MLX-4bit",
+    "model_name": "Qwen3.6-27B-MLX-4bit",
     "max_context_length": null,
     "kv_quantization": true,
     "auto_unload_time": 600
@@ -133,7 +148,7 @@ worker process was launched:
 ```json
 {
   "status": "applying",
-  "model": "Qwen3.8-27B-MLX-4bit",
+  "model": "Qwen3.6-27B-MLX-4bit",
   "changes": ["kv_quantization", "max_context_length"],
   "message": "Model serving is restarting; poll GET /status until phase is 'ready'."
 }

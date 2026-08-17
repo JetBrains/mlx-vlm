@@ -1,8 +1,10 @@
 # Junie local server — install & run (from sources)
 
-Serves `Qwen3.8-27B-MLX-4bit` on Apple Silicon as an
-OpenAI-compatible endpoint for Junie, with MTP + n-gram speculative
-decoding, prefix caching (APC), and int8 NAX prefill.
+Serves `Qwen3.6-27B-MLX-4bit` (default) and `Qwen3.8-27B-MLX-4bit` on
+Apple Silicon as an OpenAI-compatible endpoint for Junie, with MTP + n-gram
+speculative decoding, prefix caching (APC), and int8 NAX prefill. One model
+is loaded at a time; a chat request naming the other one reloads the worker
+(see JUNIE_API.md).
 
 ## 1. Clone
 
@@ -17,8 +19,9 @@ Installed separately (by the packaged installer):
 
 - model weights in the configured `models_dir`
   (`~/.local/share/junie-local/models/` by default), as plain directories
-  named after the model (`Qwen3.8-27B-MLX-4bit` and
-  `Qwen3.8-27B-MTP-MLX-4bit`, ~17 GB) — the worker loads them from there
+  named after the model (`Qwen3.6-27B-MLX-4bit` and `Qwen3.8-27B-MLX-4bit`
+  plus their `...-MTP-MLX-4bit` drafters, ~17 GB each pair) — the worker
+  loads them from there
   by directory name, offline (HF-hub cache layout by repo id also works);
 - `~/.junie/models/local-qwen3.6-27b-4bit-vlm.json`, the Junie model
   descriptor pointing at `http://localhost:19239/v1/chat/completions`, and
