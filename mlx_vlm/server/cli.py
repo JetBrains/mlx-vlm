@@ -87,6 +87,15 @@ def main():
         help="Tokens per prefill step (default: %(default)s).",
     )
     parser.add_argument(
+        "--int8-prefill",
+        action="store_true",
+        help=(
+            "Route prefill-sized MLP matmuls through W8A8 int8 GEMMs on the "
+            "M5 GPU neural accelerators (decode keeps the quantized kernels). "
+            "Requires an M5-class GPU. Maps to the MLX_VLM_INT8_PREFILL env var."
+        ),
+    )
+    parser.add_argument(
         "--log-progress-interval",
         type=int,
         default=get_log_progress_interval(),
@@ -247,6 +256,8 @@ def main():
         os.environ["MLX_VLM_DRAFT_BLOCK_SIZE"] = str(args.draft_block_size)
     if args.prefill_step_size:
         os.environ["PREFILL_STEP_SIZE"] = str(args.prefill_step_size)
+    if args.int8_prefill:
+        os.environ["MLX_VLM_INT8_PREFILL"] = "1"
     os.environ["MLX_VLM_LOG_PROGRESS_INTERVAL"] = str(args.log_progress_interval)
     os.environ["MLX_VLM_MAX_TOKENS"] = str(args.max_tokens)
     os.environ["MLX_VLM_ENABLE_THINKING"] = "1" if args.enable_thinking else "0"
