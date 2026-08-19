@@ -27,3 +27,4 @@ var/
 .venv
 .codex_tmp/
 .vscode
+.idea
