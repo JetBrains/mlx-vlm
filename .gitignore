@@ -28,3 +28,7 @@ var/
 .codex_tmp/
 .vscode
 .idea
+
+# benchmark artifacts
+research/models/
+research/results/
