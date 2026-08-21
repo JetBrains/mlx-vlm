@@ -13,9 +13,11 @@ import mlx_vlm_gateway.supervisor as supervisor_module
 from mlx_vlm_gateway.app import GatewaySettings, create_app
 from mlx_vlm_gateway.memory_monitor import MemorySample
 from mlx_vlm_gateway.supervisor import GATEWAY_PID_ENV
-from mlx_vlm_shared.server_settings import SUPPORTED_MODELS
+from mlx_vlm_shared.server_settings import DEFAULT_CONFIG, discover_models, mtp_model_name
 
-DEFAULT_MODEL, OTHER_MODEL = list(SUPPORTED_MODELS)[:2]
+_available = discover_models(DEFAULT_CONFIG["models_dir"])
+DEFAULT_MODEL = _available[0] if _available else "Qwen3.6-27B-MLX-4bit"
+OTHER_MODEL = _available[1] if len(_available) > 1 else "Qwen3.8-27B-MLX-4bit"
 
 
 class FakeProcess:
@@ -1445,7 +1447,7 @@ def test_request_for_other_model_reloads_idle_worker(monkeypatch, tmp_path):
         assert len(processes) == 2
         persisted = json.loads(config_path.read_text())
         assert persisted["model_name"] == OTHER_MODEL
-        assert persisted["draft_model"] == SUPPORTED_MODELS[OTHER_MODEL]
+        assert persisted["draft_model"] == mtp_model_name(OTHER_MODEL)
         assert client.get("/status").json()["model"]["id"] == OTHER_MODEL
 
 

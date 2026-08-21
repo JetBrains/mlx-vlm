@@ -9,6 +9,7 @@ resolve the same path through :func:`config_path`.
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 
@@ -122,13 +123,37 @@ DEFAULT_CONFIG = {
 DEFAULT_PUBLIC_SETTINGS = {key: DEFAULT_CONFIG[key] for key in PUBLIC_SETTING_KEYS}
 DEFAULT_DRAFT_MODEL = DEFAULT_CONFIG["draft_model"]
 
-# The models the server can serve, each paired with its MTP drafter. Both
-# live in "models_dir" with the same layout. A chat request naming one of
-# these gets the worker (re)loaded with it; any other name is rejected.
-SUPPORTED_MODELS = {
-    "Qwen3.6-27B-MLX-4bit": "Qwen3.6-27B-MTP-MLX-4bit",
-    "Qwen3.8-27B-MLX-4bit": "Qwen3.8-27B-MTP-MLX-4bit",
-}
+def mtp_model_name(name: str) -> str:
+    """Derive the MTP drafter name from a main model name.
+
+    The MTP drafter for a model named ``...-MLX-...`` is the same name with
+    ``MTP-`` inserted before ``MLX-`` (e.g. ``Qwen3.6-27B-MLX-4bit`` →
+    ``Qwen3.6-27B-MTP-MLX-4bit``). Returns the input unchanged when it has
+    no ``MLX-`` marker.
+    """
+    return name.replace("MLX-", "MTP-MLX-")
+
+
+def discover_models(models_dir: str) -> list[str]:
+    """Discover main models by scanning ``models_dir`` for directories.
+
+    Returns sorted names of directories that are not MTP drafters (i.e. do
+    not contain ``-MTP-`` in their name). Hidden files and non-directory
+    entries are skipped. Returns an empty list when the directory does not
+    exist or cannot be read.
+    """
+    path = Path(models_dir).expanduser()
+    if not path.is_dir():
+        return []
+    try:
+        entries = sorted(path.iterdir())
+    except OSError:
+        return []
+    return [
+        entry.name
+        for entry in entries
+        if entry.is_dir() and not entry.name.startswith(".") and "-MTP-" not in entry.name
+    ]
 
 
 def _is_positive_int_or_none(value) -> bool:

@@ -10,8 +10,9 @@ from mlx_vlm_shared.server_settings import (
     DEFAULT_PUBLIC_SETTINGS,
     PUBLIC_SETTING_KEYS,
     RESTART_SETTING_KEYS,
-    SUPPORTED_MODELS,
+    discover_models,
     is_valid_setting,
+    mtp_model_name,
     normalize_config,
 )
 
@@ -97,6 +98,25 @@ class SettingsStore:
     def draft_model(self) -> Optional[str]:
         return self._config.get("draft_model", DEFAULT_DRAFT_MODEL)
 
+    def available_models(self) -> list[str]:
+        """Main models discovered in the configured ``models_dir``."""
+        models_dir = self._config.get("models_dir", DEFAULT_CONFIG["models_dir"])
+        return discover_models(models_dir)
+
+    def validate_model_name(self, name: str) -> None:
+        """Raise ``SettingsValidationError`` if ``name`` is not a discovered model.
+
+        The currently configured model is always accepted, even when it is not
+        in the discovered list (e.g. a custom model set in the config file).
+        """
+        if name == self._config.get("model_name"):
+            return
+        available = self.available_models()
+        if name not in available:
+            raise SettingsValidationError(
+                f"Model '{name}' not found. Available models: {', '.join(available)}"
+            )
+
     def validate(self, body) -> tuple[dict, bool]:
         if not isinstance(body, dict):
             raise SettingsValidationError("Request body must be a JSON object.")
@@ -118,10 +138,12 @@ class SettingsStore:
                     '"model_name" must be a non-empty string.'
                 )
             updates["model_name"] = value.strip()
-            if updates["model_name"] not in SUPPORTED_MODELS:
+            models_dir = self._config.get("models_dir", DEFAULT_CONFIG["models_dir"])
+            available = discover_models(models_dir)
+            if updates["model_name"] not in available:
                 raise SettingsValidationError(
                     "Unsupported model. Available models: "
-                    f"{', '.join(SUPPORTED_MODELS)}"
+                    f"{', '.join(available)}"
                 )
 
         for key in ("max_context_length", "auto_unload_time"):
@@ -137,12 +159,14 @@ class SettingsStore:
         return updates, force
 
     def save(self, updates: dict) -> dict:
-        # A supported model always runs with its paired drafter; switching
+        # A discovered model always runs with its paired drafter; switching
         # one without the other would feed the verify pass a mismatched MTP
         # head.
-        drafter = SUPPORTED_MODELS.get(updates.get("model_name"))
-        if drafter is not None and "draft_model" not in updates:
-            updates = {**updates, "draft_model": drafter}
+        model_name = updates.get("model_name")
+        if model_name and "draft_model" not in updates:
+            models_dir = self._config.get("models_dir", DEFAULT_CONFIG["models_dir"])
+            if model_name in discover_models(models_dir):
+                updates = {**updates, "draft_model": mtp_model_name(model_name)}
         config, invalid = normalize_config({**self._config, **updates})
         if invalid:
             raise SettingsValidationError(f"Invalid settings: {sorted(invalid)}")

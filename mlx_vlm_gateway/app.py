@@ -24,7 +24,6 @@ from mlx_vlm_shared.errors import (
 from mlx_vlm_shared.server_settings import (
     CONFIG_PATH_ENV,
     DEFAULT_CONFIG_PATH,
-    SUPPORTED_MODELS,
     config_path,
     load_config,
 )
@@ -549,31 +548,27 @@ def create_app(
             raise HTTPException(
                 status_code=400, detail="Request body must be a JSON object"
             )
-        # Requests may name either supported model; the worker serves one at
-        # a time, so a different supported model means reloading the worker
-        # (below). The configured model is also accepted even when it is not
-        # in the supported list, e.g. a custom model set in the config file.
+        # Requests may name a discovered model; the worker serves one at a
+        # time, so a different model means reloading the worker (below). The
+        # currently configured model is always accepted, even when it is not
+        # in the discovered list (e.g. a custom model set in the config file).
         # An absent model field means "whatever is configured".
         requested_model = payload.get("model")
         store = settings_store(request)
-        if (
-            requested_model
-            and requested_model not in SUPPORTED_MODELS
-            and requested_model != store.current()["model_name"]
-        ):
-            return JSONResponse(
-                status_code=404,
-                content={
-                    "error": {
-                        "message": (
-                            f"Model '{requested_model}' not found. Available "
-                            f"models: {', '.join(SUPPORTED_MODELS)}."
-                        ),
-                        "type": "invalid_request_error",
-                        "code": "model_not_found",
-                    }
-                },
-            )
+        if requested_model:
+            try:
+                store.validate_model_name(requested_model)
+            except SettingsValidationError as exc:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": {
+                            "message": str(exc),
+                            "type": "invalid_request_error",
+                            "code": "model_not_found",
+                        }
+                    },
+                )
         payload["stream"] = False
         headers = {"content-type": "application/json", **worker_auth}
         for name in ("x-apc-tenant", "x-tenant-id"):

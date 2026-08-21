@@ -16,6 +16,8 @@ from mlx_vlm_shared.server_settings import (
     DEFAULT_CONFIG,
     DEFAULT_CONFIG_PATH,
     config_path,
+    discover_models,
+    mtp_model_name,
 )
 
 
@@ -194,6 +196,9 @@ def test_settings_are_validated_once_and_then_read_from_memory(tmp_path):
     assert store.current()["model_name"] == "demo"
 
 
+_AVAILABLE_MODELS = discover_models(DEFAULT_CONFIG["models_dir"])
+
+
 @pytest.mark.parametrize(
     ("body", "message"),
     [
@@ -204,7 +209,7 @@ def test_settings_are_validated_once_and_then_read_from_memory(tmp_path):
         (
             {"model_name": "other-model"},
             "Unsupported model. Available models: "
-            "Qwen3.6-27B-MLX-4bit, Qwen3.8-27B-MLX-4bit",
+            f"{', '.join(_AVAILABLE_MODELS)}",
         ),
         (
             {"max_context_length": 0},
@@ -257,4 +262,4 @@ def test_saving_a_supported_model_switches_its_drafter_too(tmp_path):
 
     assert settings["model_name"] == "Qwen3.8-27B-MLX-4bit"
     persisted = json.loads(path.read_text())
-    assert persisted["draft_model"] == "Qwen3.8-27B-MTP-MLX-4bit"
+    assert persisted["draft_model"] == mtp_model_name("Qwen3.8-27B-MLX-4bit")
