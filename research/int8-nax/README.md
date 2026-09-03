@@ -340,7 +340,47 @@ Net vs the ttl cache: ~5% prefill throughput for −17 GB peak memory.
 3. Row-quant kernel is ~78 GB/s effective; could be faster, but it's only ~7%
    of the GEMM pipeline.
 
-## 8. Files in this directory
+## 7c. int8 × int4b microbenchmark (2026-09-03): hardware path verified, FASTER than int8×int8
+
+`int4b_gemm.py` — the `int8 × int4b_format → int32` matmul2d combination
+(README lever 5 / the "no int8 copy" variant of lever 1), measured for real:
+
+- **API facts:** int4b is a *memory-operand* format only — cooperative input
+  tensors reject it (that's what killed the `mma_rate.py`-style register
+  benchmark). Tensor data handle type is `device uchar*`; K must be dynamic
+  or a multiple of 32. Nibble order is **low nibble first — identical to
+  MLX's affine 4-bit packing**; values are signed 4-bit two's complement.
+  Bit-exact int32 results vs numpy, including off-tile M.
+- **Tiling is NOT transferable from int8:** at the int8-optimal 128×128/8simd
+  the int4b GEMM collapses to ~58 TOPS. Its own optimum is **TM=96, TN=128,
+  8 simdgroups**.
+- **Speed at that config** (raw int32-out kernel; int8×int8 at its own best
+  128×128 config for comparison):
+
+  | shape | int8×int8 | int8×int4b |
+  |---|---|---|
+  | M=2048 gate/up (K=5120→N=17408) | 79.7 TOPS | **98.4 TOPS (+23%)** |
+  | M=2048 down (K=17408→N=5120) | 91.3 | 91.1 (par) |
+  | M=4096 gate/up | 95.6 | 98.9 |
+  | M=4096 down | 98.6 | 95.4 |
+  | M=8192 gate/up | 96.3 | **106.4 (+10%)** |
+
+  Halved B-fetch bandwidth ≥ pays for the in-datapath unpacking. On top of
+  the GEMM-level parity/win, the production win is eliminating the per-chunk
+  fused requant pass (~0.2 s per full-model pass) and the transient int8
+  copies entirely.
+- **Integration blocker — scale granularity:** the model's affine 4-bit
+  weights carry per-64-group (along K) scales+biases; a single int32
+  accumulation can only absorb per-row × per-column scales in the epilogue.
+  Options: (a) one-time repack to per-channel symmetric int4 — free at
+  runtime but a coarser quantization grid than group-64 affine, needs a
+  quality eval before trusting; (b) K-group-chunked accumulation to keep
+  group scales — **measured in `int4b_chunked.py` and ruled out**: C=64
+  chunks → 7 TOPS, C=128 → 12, C=1024 → 46 (vs 98 single-shot; the static-K
+  descriptor + fp32 side accumulator cost ~30% by themselves, and each extra
+  `op.run` boundary ~0.56 ms); (c) status quo (requant to per-channel int8,
+  near-lossless since int8 has headroom over the 4-bit grid). The quality
+  question of (a) is the whole decision.
 
 | file | what it does |
 |---|---|
@@ -353,6 +393,10 @@ Net vs the ttl cache: ~5% prefill throughput for −17 GB peak memory.
 | `int8_gemm_sweep.py` | tile/simdgroup/K-loop sweep that found the 128×128×8simd config |
 | `w8a8.py` | standalone W8A8 building blocks (row-quant kernel + GEMM); production copy lives in `mlx_vlm/int8_prefill.py` |
 | `e2e_int8.py` | end-to-end A/B of the int8 prefill patch on the served model |
+| `int4b_gemm.py` | int8 × int4b_format → int32 GEMM vs int8×int8: correctness (nibble order, signedness) + speed at prefill shapes (see §7c) |
+| `mma_rate_int4b.py` | negative result: int4b rejected as cooperative input tensor — must be a memory operand |
+| `int4b_chunked.py` | option (b) benchmark: group-chunked scaled accumulation — correct but 2–14× too slow at any chunk width (see §7c) |
+| `quantization-and-scales.md` | ground-up explainer: 4-bit affine storage, group scales, why int8 requants per-channel, the int4b scale-granularity tension |
 
 Run any of them with the repo venv: `.venv/bin/python research/int8-nax/<file>.py`.
 Re-run `peak2.py` + `e2e_dequant.py` after every `mlx` upgrade — if upstream ships int8 or
