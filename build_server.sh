@@ -39,8 +39,9 @@ HIDDEN_DEPS=(
   --collect-submodules mlx_vlm.models
   --collect-submodules mlx_vlm.speculative.drafters
   --collect-submodules mlx_vlm.tool_parsers
-  # mlx: imported from native code.
-  --hidden-import mlx._reprlib_fix
+  # mlx: imported from native code, including __array_api_info required by
+  # the C extension at initialization time.
+  --collect-submodules mlx
   # mlx: 162 MB shader library, opened at run time as data.
   --add-data "$MLX_LIB_DIR/mlx.metallib:mlx/lib"
   # mlx-lm: importlib names from config keys; only reached for text-only models.
