@@ -5,4 +5,4 @@ mlx-vlm this fork follows. Bump this one when shipping a tarball from
 build_server.sh; it names the archive.
 """
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
