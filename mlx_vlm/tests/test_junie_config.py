@@ -4,6 +4,8 @@ import logging
 import os
 import sys
 
+import pytest
+
 from mlx_vlm.server import _app_module as server_app
 from mlx_vlm.server.junie import launch
 from mlx_vlm_shared.server_settings import (
@@ -12,6 +14,17 @@ from mlx_vlm_shared.server_settings import (
     load_config,
     normalize_config,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    # apply_inference_env and the launcher write straight into os.environ;
+    # monkeypatch can't undo writes made by the code under test, so snapshot
+    # and restore around every test to keep them from leaking suite-wide.
+    saved = os.environ.copy()
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
 
 
 def test_config_file_drives_model_preload(monkeypatch, tmp_path):
