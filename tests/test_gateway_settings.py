@@ -190,7 +190,7 @@ def test_settings_are_validated_once_and_then_read_from_memory(tmp_path):
     store = SettingsStore(str(path))
     path.write_text(json.dumps({"auto_unload_time": 123}))
 
-    assert store.current()["auto_unload_time"] == 600
+    assert store.current()["auto_unload_time"] == DEFAULT_CONFIG["auto_unload_time"]
     assert store.current()["model_name"] == "demo"
 
 

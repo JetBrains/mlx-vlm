@@ -13,7 +13,7 @@ import mlx_vlm_gateway.supervisor as supervisor_module
 from mlx_vlm_gateway.app import GatewaySettings, create_app
 from mlx_vlm_gateway.memory_monitor import MemorySample
 from mlx_vlm_gateway.supervisor import GATEWAY_PID_ENV
-from mlx_vlm_shared.server_settings import SUPPORTED_MODELS
+from mlx_vlm_shared.server_settings import DEFAULT_CONFIG, SUPPORTED_MODELS
 
 DEFAULT_MODEL, OTHER_MODEL = list(SUPPORTED_MODELS)[:2]
 
@@ -365,7 +365,7 @@ def test_apply_auto_unload_time_without_restarting_worker(monkeypatch, tmp_path)
             "settings": {
                 "model_name": "demo",
                 "max_context_length": None,
-                "kv_quantization": True,
+                "kv_quantization": DEFAULT_CONFIG["kv_quantization"],
                 "auto_unload_time": 600,
             },
         }
@@ -398,8 +398,9 @@ def test_invalid_auto_unload_uses_default_and_task_keeps_running(monkeypatch, tm
     app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
-        assert json.loads(config_path.read_text())["auto_unload_time"] == 600
-        app.state.supervisor.last_activity_at -= 601
+        idle_timeout_s = DEFAULT_CONFIG["auto_unload_time"]
+        assert json.loads(config_path.read_text())["auto_unload_time"] == idle_timeout_s
+        app.state.supervisor.last_activity_at -= idle_timeout_s + 1
         _wait_until(lambda: processes[0].returncode is not None)
 
         status = client.get("/status").json()
