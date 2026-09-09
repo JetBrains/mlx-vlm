@@ -411,14 +411,48 @@ def _start_seed_prefix_warmup() -> None:
     Thread(target=run, daemon=True, name="apc-seed-warmup").start()
 
 
+def _apply_mlx_cache_limit() -> Optional[int]:
+    """Cap the MLX allocator cache from MLX_VLM_CACHE_LIMIT_GB.
+
+    MLX keeps freed buffers around for reuse. During long prefills the
+    chunk logits (~2 GB each) and superseded batch-cache copies accumulate
+    in that cache; without a cap it grew to 15-17 GB on a 27B model and the
+    process footprint peaked at 42 GB with 25 GB of live tensors. A few GB
+    of cache keeps the reuse benefit for decode while bounding the peak.
+    Unset or 0 leaves the MLX default untouched.
+    """
+    raw = os.environ.get("MLX_VLM_CACHE_LIMIT_GB", "").strip()
+    if not raw:
+        return None
+    try:
+        limit_gb = float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid MLX_VLM_CACHE_LIMIT_GB=%r", raw)
+        return None
+    if limit_gb <= 0:
+        return None
+    limit = int(limit_gb * (1 << 30))
+    mx.set_cache_limit(limit)
+    logger.info("MLX allocator cache limit set to %.1f GB", limit_gb)
+    return limit
+
+
 @asynccontextmanager
 async def lifespan(app):
+    _apply_mlx_cache_limit()
     dequant_prefill = os.environ.get("MLX_VLM_DEQUANT_PREFILL", "")
     if dequant_prefill.lower() in ("1", "true", "yes", "on"):
         from ..dequant_prefill import apply as _apply_dequant_prefill
 
         _apply_dequant_prefill()
         logger.info("Dequantize-on-the-fly prefill patch applied.")
+
+    apc_hybrid = os.environ.get("MLX_VLM_APC_HYBRID", "")
+    if apc_hybrid.lower() in ("1", "true", "yes", "on"):
+        from ..apc_hybrid import install as _install_apc_hybrid
+
+        _install_apc_hybrid()
+        logger.info("Hybrid APC (KV blocks + recurrent-state checkpoint ladder) installed.")
 
     int8_prefill = os.environ.get("MLX_VLM_INT8_PREFILL", "")
     if int8_prefill.lower() in ("1", "true", "yes", "on"):
@@ -555,6 +589,58 @@ def _audio_cache_group(model_kind: str) -> str:
     return "audio"
 
 
+def _model_alias_enabled() -> bool:
+    return os.environ.get("MLX_VLM_MODEL_ALIAS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _model_is_local(name: str) -> bool:
+    if not name:
+        return False
+    if os.path.exists(os.path.expanduser(name)):
+        return True
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except Exception:  # pragma: no cover - defensive
+        return False
+    return os.path.isdir(
+        os.path.join(HF_HUB_CACHE, "models--" + name.replace("/", "--"))
+    )
+
+
+_aliased_model_names_logged: set = set()
+
+
+def _alias_model_path(model_path: str, model_kind: str = "auto") -> str:
+    """Serve requests for model names that are not available locally with
+    the text model that is already loaded.
+
+    Coding agents ask for the model id baked into their profile or their
+    defaults: an agent's sub-agents request their vendor's cloud model ids,
+    Junie sends the id from its model profile, Continue or
+    Cursor their configured name. Loading that name literally means a
+    HuggingFace download attempt, an HTTP 500 and a client stuck retrying.
+    A name that resolves to a local path or a cached HF repo is honoured as
+    before; anything else maps to the loaded text model.
+    MLX_VLM_MODEL_ALIAS=0 restores the strict behaviour.
+    """
+    if not _model_alias_enabled() or model_kind not in ("auto", "text_generation"):
+        return model_path
+    loaded = _model_cache_registry().for_kind("text_generation").get("cache_key")
+    if not loaded or model_path == loaded[0] or _model_is_local(model_path):
+        return model_path
+    if model_path not in _aliased_model_names_logged:
+        _aliased_model_names_logged.add(model_path)
+        logger.info(
+            "Model %r is not available locally; serving it with %s", model_path, loaded[0]
+        )
+    return loaded[0]
+
+
 def get_cached_model(
     model_path: str,
     adapter_path=_INHERIT_ADAPTER,
@@ -565,6 +651,7 @@ def get_cached_model(
     Factory function to get or load the appropriate model resources from cache or by loading.
     Also creates/updates the ResponseGenerator for continuous batching.
     """
+    model_path = _alias_model_path(model_path, model_kind)
     load_as_edit = model_kind == "image_edit"
     load_as_audio = _audio_model_kind(model_kind)
     load_as_image = model_kind == "image_generation" or (

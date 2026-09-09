@@ -2,6 +2,7 @@ import asyncio
 import gc
 import json
 import logging
+import os
 import time
 import traceback
 import uuid
@@ -87,6 +88,35 @@ def _anthropic_error_response(
 
 def _sse_event(event: str, payload: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+# Streaming /v1/messages used to send message_start together with the first
+# token, i.e. only after the whole prefill (30-50 s on a long agent context).
+# Agent clients show "waiting for the API" until they see message_start,
+# so the cloud API behaviour is mirrored: message_start goes out as soon as
+# the request is accepted and ping events keep the stream alive while the
+# prompt is being processed. The prompt-side usage that the real
+# message_start would have carried is reported in message_delta instead.
+# MLX_VLM_EARLY_MESSAGE_START=0 restores the old ordering.
+def _early_message_start_enabled() -> bool:
+    return os.environ.get("MLX_VLM_EARLY_MESSAGE_START", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _sse_ping_seconds() -> float:
+    raw = os.environ.get("MLX_VLM_SSE_PING_SECONDS", "3").strip()
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = 3.0
+    return max(0.05, seconds)
+
+
+_PING = object()
 
 
 def _anthropic_system_text(system: Optional[Union[str, List[Any]]]) -> Optional[str]:
@@ -369,14 +399,33 @@ def _anthropic_messages_to_internal(
     return processed_messages, images, tools, tool_choice
 
 
+def _adaptive_thinking_enables() -> bool:
+    """Whether ``thinking: {"type": "adaptive"}`` forces thinking on.
+
+    Coding-agent clients send ``adaptive`` on every request. Treating it as
+    ``enabled`` makes the model think on every tool call; by default it now
+    means "let the server decide" (the configured thinking default). Set
+    ``MLX_VLM_ADAPTIVE_THINKING=1`` to restore the old behaviour.
+    """
+    return os.environ.get("MLX_VLM_ADAPTIVE_THINKING", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _anthropic_request_with_derived_fields(
     request: AnthropicRequest,
 ) -> AnthropicRequest:
     thinking = _as_plain_dict(request.thinking)
     if request.enable_thinking is None and isinstance(thinking, dict):
         thinking_type = thinking.get("type")
-        if thinking_type in ("enabled", "adaptive"):
+        if thinking_type == "enabled":
             request.enable_thinking = True
+        elif thinking_type == "adaptive":
+            if _adaptive_thinking_enables():
+                request.enable_thinking = True
         elif thinking_type == "disabled":
             request.enable_thinking = False
     if request.thinking_budget is None and isinstance(thinking, dict):
@@ -553,6 +602,27 @@ async def anthropic_messages_endpoint(http_request: Request):
                 in_tool_call = False
                 tc_start = tool_module.tool_call_start if tool_module else None
                 message_started = False
+                early_start = _early_message_start_enabled()
+                ping_seconds = _sse_ping_seconds()
+
+                async def with_pings(awaitable):
+                    """Await ``awaitable``; yield ``_PING`` whenever it takes
+                    longer than ``ping_seconds`` (only once message_start has
+                    already been sent), then the result."""
+                    if not early_start:
+                        yield await awaitable
+                        return
+                    pending = asyncio.ensure_future(awaitable)
+                    try:
+                        while True:
+                            done, _ = await asyncio.wait({pending}, timeout=ping_seconds)
+                            if done:
+                                break
+                            yield _PING
+                    except BaseException:
+                        pending.cancel()
+                        raise
+                    yield pending.result()
 
                 def close_open_block():
                     nonlocal open_block_type, block_index
@@ -613,14 +683,23 @@ async def anthropic_messages_endpoint(http_request: Request):
                     )
 
                 try:
+                    if early_start:
+                        for event in start_message_event():
+                            yield event
                     if runtime.response_generator is not None:
-                        ctx, token_iter = await asyncio.to_thread(
-                            runtime.response_generator.generate,
-                            formatted_prompt,
-                            images if images else None,
-                            None,
-                            gen_args,
-                        )
+                        async for item in with_pings(
+                            asyncio.to_thread(
+                                runtime.response_generator.generate,
+                                formatted_prompt,
+                                images if images else None,
+                                None,
+                                gen_args,
+                            )
+                        ):
+                            if item is _PING:
+                                yield _sse_event("ping", {"type": "ping"})
+                            else:
+                                ctx, token_iter = item
                         prompt_tokens = ctx.prompt_tokens
 
                         def _next_token():
@@ -649,8 +728,17 @@ async def anthropic_messages_endpoint(http_request: Request):
 
                         token_source = "generate"
 
+                    first_token = True
                     while True:
-                        token = await asyncio.to_thread(_next_token)
+                        if first_token:
+                            async for item in with_pings(asyncio.to_thread(_next_token)):
+                                if item is _PING:
+                                    yield _sse_event("ping", {"type": "ping"})
+                                else:
+                                    token = item
+                            first_token = False
+                        else:
+                            token = await asyncio.to_thread(_next_token)
                         if token is None:
                             break
                         if not hasattr(token, "text"):
@@ -788,6 +876,13 @@ async def anthropic_messages_endpoint(http_request: Request):
                         tool_calls=bool(parsed_tool_calls),
                         stop_sequence=stop_sequence,
                     )
+                    delta_usage: Dict[str, Any] = {"output_tokens": output_tokens}
+                    if early_start:
+                        # message_start went out before the prompt was
+                        # processed, so the prompt-side counts live here.
+                        delta_usage = AnthropicUsage.from_metrics(
+                            metrics, prompt_tokens, output_tokens
+                        ).model_dump()
                     yield _sse_event(
                         "message_delta",
                         {
@@ -796,7 +891,7 @@ async def anthropic_messages_endpoint(http_request: Request):
                                 "stop_reason": anth_stop_reason,
                                 "stop_sequence": stop_sequence,
                             },
-                            "usage": {"output_tokens": output_tokens},
+                            "usage": delta_usage,
                         },
                     )
                     yield _sse_event("message_stop", {"type": "message_stop"})

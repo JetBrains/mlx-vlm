@@ -560,6 +560,16 @@ def create_app(
             requested_model
             and requested_model not in SUPPORTED_MODELS
             and requested_model != store.current()["model_name"]
+            and store.model_alias()
+        ):
+            # Unknown names are served by the configured model (see the
+            # "model_alias" config key); the worker sees the real name.
+            requested_model = store.current()["model_name"]
+            payload["model"] = requested_model
+        if (
+            requested_model
+            and requested_model not in SUPPORTED_MODELS
+            and requested_model != store.current()["model_name"]
         ):
             return JSONResponse(
                 status_code=404,

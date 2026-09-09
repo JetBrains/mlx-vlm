@@ -97,6 +97,9 @@ class SettingsStore:
     def draft_model(self) -> Optional[str]:
         return self._config.get("draft_model", DEFAULT_DRAFT_MODEL)
 
+    def model_alias(self) -> bool:
+        return bool(self._config.get("model_alias", DEFAULT_CONFIG["model_alias"]))
+
     def validate(self, body) -> tuple[dict, bool]:
         if not isinstance(body, dict):
             raise SettingsValidationError("Request body must be a JSON object.")
