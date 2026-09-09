@@ -61,7 +61,7 @@ class ThinkingStreamState:
         self.thinking_done = False
         self.buffer = ""
 
-    def feed(self, text: str) -> ThinkingStreamDelta:
+    def feed(self, text: str, last: bool = False) -> ThinkingStreamDelta:
         self.buffer += text or ""
         reasoning = []
         content = []
@@ -111,6 +111,13 @@ class ThinkingStreamState:
 
             self.buffer = self.buffer[idx + len(marker) :].lstrip("\n")
             self.in_thinking = True
+
+        if last and self.buffer:
+            held, self.buffer = self.buffer, ""
+            if self.in_thinking:
+                reasoning.append(self._strip_open_marker(held))
+            else:
+                content.append(_strip_content_markers(held))
 
         return ThinkingStreamDelta(
             reasoning="".join(reasoning) or None,
@@ -164,6 +171,75 @@ class ThinkingStreamState:
         return text
 
 
+class ResponseTemplateStreamState:
+    """Adapt a Transformers response-template parser to server stream deltas."""
+
+    def __init__(self, parser):
+        self.parser = parser
+
+    def feed(self, text: str, last: bool = False) -> ThinkingStreamDelta:
+        reasoning = []
+        content = []
+        thinking_closed = False
+        events = self.parser.feed(text or "")
+        if last:
+            _, final_events = self.parser.finalize()
+            events.extend(final_events)
+
+        for event in events:
+            event_type = event.get("type")
+            field = event.get("field")
+            if event_type == "region_close" and field in (
+                "reasoning",
+                "reasoning_content",
+            ):
+                thinking_closed = True
+            if event_type != "region_chunk":
+                continue
+            chunk = event.get("text")
+            if not chunk:
+                continue
+            if field in ("reasoning", "reasoning_content"):
+                reasoning.append(chunk)
+            elif field == "content":
+                content.append(chunk)
+        return ThinkingStreamDelta(
+            reasoning="".join(reasoning) or None,
+            content="".join(content) or None,
+            thinking_closed=thinking_closed,
+        )
+
+
+def _response_template_tokenizer(processor):
+    if processor is None:
+        return None
+    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+    if getattr(tokenizer, "response_template", None) is None:
+        return None
+    return tokenizer
+
+
+def make_response_stream_state(
+    processor,
+    enable_thinking: bool = False,
+    thinking_start_token: Optional[str] = None,
+    thinking_end_token: Optional[str] = None,
+):
+    tokenizer = _response_template_tokenizer(processor)
+    if tokenizer is not None and hasattr(tokenizer, "get_response_parser"):
+        try:
+            return ResponseTemplateStreamState(tokenizer.get_response_parser(prefix=""))
+        except (AttributeError, TypeError, ValueError):
+            logger.debug(
+                "Falling back from tokenizer response-template parser", exc_info=True
+            )
+    return ThinkingStreamState(
+        enable_thinking,
+        thinking_start_token,
+        thinking_end_token,
+    )
+
+
 def prompt_has_open_thinking(
     prompt: Any,
     enable_thinking: bool = False,
@@ -188,24 +264,69 @@ response_store_order: deque = deque()
 response_store_lock = Lock()
 
 
-def suppress_tool_call_content(
-    full_output: str,
-    in_tool_call: bool,
-    tc_start: Optional[str],
-    delta_content: Optional[str],
-) -> Tuple[bool, Optional[str]]:
-    """Suppress tool-call markup from streamed delta.content."""
-    if not tc_start:
-        return in_tool_call, delta_content
-    if not in_tool_call:
-        if tc_start in full_output:
-            return True, None
+class ToolCallStreamState:
+    """Remove tool-call spans from streamed content, independent of chunking.
 
-        if any(full_output.endswith(tc_start[:j]) for j in range(2, len(tc_start))):
-            return False, None
-    else:
-        return True, None
-    return in_tool_call, delta_content
+    Marker fragments are buffered until they either complete or stop matching.
+    Text outside calls is emitted exactly once; text and markup inside calls is
+    discarded. Parsers with no end marker keep the historical latching behavior
+    after the first start marker.
+    """
+
+    def __init__(
+        self,
+        tc_start: Optional[str],
+        tc_end: Optional[str],
+    ):
+        self.tc_start = tc_start or ""
+        self.tc_end = tc_end or ""
+        self.in_tool_call = False
+        self.buffer = ""
+
+    def feed(self, text: Optional[str], last: bool = False) -> Optional[str]:
+        if not self.tc_start:
+            return text
+
+        self.buffer += text or ""
+        visible = []
+
+        while self.buffer:
+            marker = self.tc_end if self.in_tool_call else self.tc_start
+            if not marker:
+                # A parser with no end marker treats the rest of the generation
+                # as tool-call content once its start marker has been seen.
+                self.buffer = ""
+                break
+
+            marker_at = self.buffer.find(marker)
+            if marker_at >= 0:
+                if not self.in_tool_call and marker_at:
+                    visible.append(self.buffer[:marker_at])
+                self.buffer = self.buffer[marker_at + len(marker) :]
+                self.in_tool_call = not self.in_tool_call
+                continue
+
+            stable, self.buffer = self._split_partial_marker(self.buffer, marker)
+            if stable and not self.in_tool_call:
+                visible.append(stable)
+            break
+
+        if last and self.buffer:
+            if not self.in_tool_call:
+                # An unfinished start-marker prefix is ordinary content when
+                # generation ends before the marker can complete.
+                visible.append(self.buffer)
+            self.buffer = ""
+
+        return "".join(visible) or None
+
+    @staticmethod
+    def _split_partial_marker(text: str, marker: str) -> Tuple[str, str]:
+        max_length = min(len(text), len(marker) - 1)
+        for length in range(max_length, 0, -1):
+            if text.endswith(marker[:length]):
+                return text[:-length], text[-length:]
+        return text, ""
 
 
 def process_tool_calls(model_output: str, tool_module, tools):
@@ -253,8 +374,8 @@ def process_tool_calls(model_output: str, tool_module, tools):
                                 },
                             },
                         )
-                except Exception:
-                    logger.warning("Invalid tool call: %s", call)
+                except Exception as exc:
+                    logger.warning("Invalid tool call %r: %s", call, exc)
     return dict(calls=called_tools, remaining_text=remaining)
 
 
@@ -289,9 +410,33 @@ def _split_thinking(
     text: str,
     thinking_start_token: Optional[str] = None,
     thinking_end_token: Optional[str] = None,
+    starts_in_thinking: bool = False,
+    processor=None,
 ) -> Tuple[Optional[str], str]:
     if not text:
         return None, text
+
+    tokenizer = _response_template_tokenizer(processor)
+    if tokenizer is not None and hasattr(tokenizer, "parse_response"):
+        try:
+            parsed = tokenizer.parse_response(text, prefix="")
+            if isinstance(parsed, dict) and (
+                "content" in parsed
+                or "reasoning" in parsed
+                or "reasoning_content" in parsed
+            ):
+                reasoning = parsed.get("reasoning_content") or parsed.get("reasoning")
+                content = parsed.get("content")
+                if reasoning is None or isinstance(reasoning, str):
+                    if content is None or isinstance(content, str):
+                        return (
+                            reasoning.strip() if reasoning else None,
+                            content.strip() if content else "",
+                        )
+        except (AttributeError, TypeError, ValueError):
+            logger.debug(
+                "Falling back from tokenizer response-template parser", exc_info=True
+            )
 
     for start_marker, end_marker in ThinkingStreamState._build_open_close_markers(
         thinking_start_token, thinking_end_token
@@ -314,6 +459,10 @@ def _split_thinking(
             reasoning = _clean_reasoning(text, start_marker)
             return reasoning or None, ""
 
+    if starts_in_thinking:
+        reasoning = _strip_content_markers(text).strip()
+        return reasoning or None, ""
+
     return None, _strip_content_markers(text).strip()
 
 
@@ -326,9 +475,13 @@ def _response_output_items_from_text(
     thinking_start_token: Optional[str] = None,
     thinking_end_token: Optional[str] = None,
     reasoning_item_id: Optional[str] = None,
+    processor=None,
 ) -> Tuple[List[Dict[str, Any]], str, Optional[str], str]:
     reasoning, content = _split_thinking(
-        full_text, thinking_start_token, thinking_end_token
+        full_text,
+        thinking_start_token,
+        thinking_end_token,
+        processor=processor,
     )
     reasoning_items = _reasoning_output_items(reasoning, reasoning_item_id)
     if tool_module is not None and chat_tools:
@@ -415,6 +568,68 @@ def _response_call_to_chat_tool_call(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _response_image_source(part: Dict[str, Any]) -> Optional[Any]:
+    part_type = part.get("type")
+    if part_type == "image_url":
+        image_url = part.get("image_url")
+        return image_url.get("url") if isinstance(image_url, dict) else image_url
+    if part_type != "input_image":
+        return None
+
+    if part.get("file_id") is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "input_image.file_id is not supported by this server. "
+                "Provide image_url instead."
+            ),
+        )
+    image_url = part.get("image_url")
+    return image_url or None
+
+
+def _response_tool_output_to_text_and_images(
+    output: Any,
+) -> Tuple[str, List[Any]]:
+    if isinstance(output, str):
+        return output, []
+    if not isinstance(output, list):
+        return json.dumps(output, ensure_ascii=False), []
+
+    text_parts = []
+    remaining_parts = []
+    output_images = []
+    for part in output:
+        part = _as_plain_dict(part)
+        if not isinstance(part, dict):
+            remaining_parts.append(part)
+            continue
+        part_type = part.get("type")
+        if part_type in ("input_text", "output_text", "text"):
+            text_parts.append(str(part.get("text", "")))
+        elif part_type in ("input_image", "image_url"):
+            image = _response_image_source(part)
+            if image:
+                output_images.append(image)
+            else:
+                remaining_parts.append(part)
+        else:
+            remaining_parts.append(part)
+
+    if remaining_parts:
+        text_parts.append(json.dumps(remaining_parts, ensure_ascii=False))
+    if output_images:
+        text_parts.append("[Image output attached in the next message]")
+    return "\n".join(part for part in text_parts if part), output_images
+
+
+def _response_image_message(image_count: int) -> Dict[str, Any]:
+    return {
+        "role": "user",
+        "content": [{"type": "image"} for _ in range(image_count)],
+    }
+
+
 def _append_response_item_to_prompt(
     item: Dict[str, Any],
     chat_messages: List[Dict[str, Any]],
@@ -425,26 +640,36 @@ def _append_response_item_to_prompt(
         role = item.get("role") or "user"
         content = item.get("content")
         if isinstance(content, list):
-            text_parts = []
+            content_parts = []
+            item_images = []
             for part in content:
                 part = _as_plain_dict(part)
                 if not isinstance(part, dict):
                     continue
                 part_type = part.get("type")
                 if part_type in ("input_text", "output_text", "text"):
-                    text_parts.append(str(part.get("text", "")))
-                elif part_type == "input_image":
-                    image = part.get("image_url") or part.get("file_id")
+                    text = str(part.get("text", ""))
+                    if text:
+                        content_parts.append({"type": "text", "text": text})
+                elif part_type in ("input_image", "image_url"):
+                    image = _response_image_source(part)
                     if image:
-                        images.append(image)
-                elif part_type == "image_url":
-                    image_url = part.get("image_url")
-                    images.append(
-                        image_url.get("url")
-                        if isinstance(image_url, dict)
-                        else image_url
-                    )
-            content = "\n".join(p for p in text_parts if p)
+                        item_images.append(image)
+                        content_parts.append({"type": "image"})
+            images.extend(item_images)
+            if item_images and role not in ("user",):
+                text = "\n".join(
+                    part["text"] for part in content_parts if part.get("type") == "text"
+                )
+                chat_messages.append({"role": role, "content": text})
+                chat_messages.append(_response_image_message(len(item_images)))
+                return
+            if item_images:
+                content = content_parts
+            else:
+                content = "\n".join(
+                    part["text"] for part in content_parts if part.get("type") == "text"
+                )
         chat_messages.append({"role": role, "content": content or ""})
         return
 
@@ -465,8 +690,7 @@ def _append_response_item_to_prompt(
         "tool_result",
     ):
         output = item.get("output", item.get("content", ""))
-        if not isinstance(output, str):
-            output = json.dumps(output, ensure_ascii=False)
+        output, output_images = _response_tool_output_to_text_and_images(output)
         chat_messages.append(
             {
                 "role": "tool",
@@ -474,6 +698,9 @@ def _append_response_item_to_prompt(
                 "content": output,
             }
         )
+        if output_images:
+            images.extend(output_images)
+            chat_messages.append(_response_image_message(len(output_images)))
 
 
 def _response_chain_items(previous_response_id: Optional[str]) -> List[Dict[str, Any]]:

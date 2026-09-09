@@ -182,7 +182,11 @@ class Qwen3VLModel(nn.Module):
             Qwen3VLDecoderLayer(args=args, layer_idx=layer_idx)
             for layer_idx in range(args.num_hidden_layers)
         ]
-        self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        self.norm = (
+            nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+            if getattr(args, "use_final_norm", True)
+            else None
+        )
 
     def __call__(
         self,
@@ -194,6 +198,8 @@ class Qwen3VLModel(nn.Module):
         # args for deepstack
         visual_pos_masks: Optional[mx.array] = None,
         deepstack_visual_embeds: Optional[mx.array] = None,
+        stop_after_layer: Optional[int] = None,
+        apply_final_norm: bool = True,
     ):
         if inputs_embeds is None:
             h = self.embed_tokens(inputs)
@@ -215,7 +221,16 @@ class Qwen3VLModel(nn.Module):
         ):
             position_embeddings = self.layers[0].self_attn.rotary_emb(h, position_ids)
 
+        if stop_after_layer is not None and not 0 <= stop_after_layer <= len(
+            self.layers
+        ):
+            raise ValueError(
+                f"stop_after_layer must be between 0 and {len(self.layers)}"
+            )
+
         for layer_idx, (layer, c) in enumerate(zip(self.layers, cache)):
+            if stop_after_layer is not None and layer_idx >= stop_after_layer:
+                break
             h = layer(h, mask, c, position_ids, position_embeddings)
             # Add deepstack visual embeds
             # add visual features to the hidden states of first several layers
@@ -228,7 +243,9 @@ class Qwen3VLModel(nn.Module):
                     deepstack_visual_embeds[layer_idx],
                 )
 
-        return self.norm(h)
+        if apply_final_norm and self.norm is not None:
+            return self.norm(h)
+        return h
 
     def _deepstack_process(
         self,
@@ -295,6 +312,14 @@ class LanguageModel(nn.Module):
         video_token_id = self.config.video_token_id
         vision_start_token_id = self.config.vision_start_token_id
         mrope_position_deltas = []
+        # The processor emits one vision block per temporal patch group, so
+        # expand each video grid (t, h, w) into t rows of (1, h, w) — the same
+        # split the reference implementation performs before indexing.
+        if video_grid_thw is not None:
+            rows = []
+            for thw in video_grid_thw.tolist():
+                rows.extend([[1, thw[1], thw[2]]] * int(thw[0]))
+            video_grid_thw = mx.array(rows, dtype=mx.int32)
         if input_ids is not None and (
             image_grid_thw is not None or video_grid_thw is not None
         ):

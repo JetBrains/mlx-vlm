@@ -306,6 +306,11 @@ class Gemma4VideoProcessor(BaseVideoProcessor):
         self.image_std = image_std or [1.0, 1.0, 1.0]
         self.default_fps = default_fps
 
+    def video_sampling_defaults(self) -> dict:
+        """Cap decoding at the frame count this processor keeps, so the
+        decoder stops reading frames ``_sample_frames`` would discard."""
+        return {"max_frames": self.num_frames}
+
     def _sample_frames(self, video: np.ndarray, num_frames: int) -> np.ndarray:
         """Uniformly sample ``num_frames`` frames from ``video`` (T, C, H, W)."""
         T = video.shape[0]
@@ -900,7 +905,7 @@ class Gemma4Processor(ProcessorMixin):
 
         from transformers import AutoTokenizer
 
-        kwargs.pop("trust_remote_code", None)
+        trust_remote_code = kwargs.pop("trust_remote_code", True)
         kwargs.pop("use_fast", None)
 
         model_path = Path(pretrained_model_name_or_path)
@@ -908,7 +913,7 @@ class Gemma4Processor(ProcessorMixin):
 
         tokenizer = AutoTokenizer.from_pretrained(
             str(model_path) if is_local else pretrained_model_name_or_path,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             local_files_only=is_local,
         )
         load_chat_template(tokenizer, pretrained_model_name_or_path)

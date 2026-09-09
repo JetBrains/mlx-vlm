@@ -327,6 +327,13 @@ class KimiVLProcessor(ProcessorMixin):
     image_processor_class = "KimiVLImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
+    @property
+    def additional_eos_token_ids(self):
+        token_id = self.tokenizer.convert_tokens_to_ids("<|im_assistant|>")
+        if token_id == getattr(self.tokenizer, "unk_token_id", None):
+            return []
+        return [token_id]
+
     def __init__(
         self,
         image_processor=None,
@@ -497,14 +504,14 @@ class KimiVLProcessor(ProcessorMixin):
         """Load the processor from a pretrained model path."""
         from huggingface_hub import hf_hub_download
 
-        kwargs.pop("trust_remote_code", None)
+        trust_remote_code = kwargs.pop("trust_remote_code", True)
         _ensure_gpt2_bytes_to_unicode()
 
         model_path = Path(pretrained_model_name_or_path)
         is_local = model_path.exists() and model_path.is_dir()
         tokenizer = AutoTokenizer.from_pretrained(
             str(model_path) if is_local else pretrained_model_name_or_path,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             local_files_only=is_local,
         )
 

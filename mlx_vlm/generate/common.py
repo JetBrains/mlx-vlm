@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
@@ -8,12 +9,27 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_reduce
 
+from ..kv_quant import from_legacy as kv_quant_from_legacy
 from ..models import cache
-from ..turboquant import TurboQuantKVCache, turboquant_enabled
+from ..turboquant import HybridQuantKVCache, TurboQuantKVCache, turboquant_enabled
 
 DEFAULT_KV_GROUP_SIZE = 64
 DEFAULT_KV_QUANT_SCHEME = "uniform"
 DEFAULT_QUANTIZED_KV_START = 5000
+
+logger = logging.getLogger("mlx_vlm.generate")
+
+DEFAULT_MAX_TOKENS = 2048
+DEFAULT_TEMPERATURE = 0.0
+DEFAULT_TOP_P = 1.0
+DEFAULT_TOP_K = 0
+DEFAULT_MIN_P = 0.0
+DEFAULT_REPETITION_CONTEXT_SIZE = 20
+DEFAULT_PREFILL_STEP_SIZE = 2048
+DEFAULT_COMPLETION_BATCH_SIZE = 32
+DEFAULT_PREFILL_BATCH_SIZE = 8
+DEFAULT_DIFFUSION_MIN_CANVAS_LENGTH = 64
+DEFAULT_DIFFUSION_MAX_DENOISING_STEPS = 48
 
 # A stream on the default device just for generation
 generation_stream = mx.new_thread_local_stream(mx.default_device())
@@ -21,6 +37,30 @@ generation_stream = mx.new_thread_local_stream(mx.default_device())
 
 def _policy_enabled(policy) -> bool:
     return bool(getattr(policy, "enabled", policy))
+
+
+def _default_prefill_step_size_for_offload(
+    model, prefill_step_size: Optional[int], draft_model, default: int
+) -> Optional[int]:
+    """A one-shot lazy prefill pins every touched expert in a single graph
+    until the final eval, defeating ``ExpertStore``'s LRU budget regardless
+    of ``prefill_step_size``'s own chunked-prefill benefits elsewhere -- so
+    an explicit ``None`` (chunking off) against an expert-offload model is a
+    footgun, not a valid choice, unless a drafter already has its own reason
+    to require an unchunked prefill."""
+    if (
+        prefill_step_size is None
+        and draft_model is None
+        and getattr(model, "moe_offload_store", None) is not None
+    ):
+        logger.warning(
+            "prefill_step_size=None with an expert-offload model: falling "
+            "back to prefill_step_size=%d instead of pinning every touched "
+            "expert resident until the final eval.",
+            default,
+        )
+        return default
+    return prefill_step_size
 
 
 def _chunked_prefill_enabled(
@@ -67,8 +107,53 @@ def maybe_quantize_kv_cache(
     kv_group_size,
     kv_bits,
     kv_quant_scheme: str = DEFAULT_KV_QUANT_SCHEME,
+    kv_key_bits: Optional[float] = None,
+    kv_value_bits: Optional[float] = None,
+    kv_key_scheme: Optional[str] = None,
+    kv_value_scheme: Optional[str] = None,
 ):
     if kv_bits is None:
+        return
+
+    policy = kv_quant_from_legacy(
+        kv_bits,
+        kv_quant_scheme,
+        kv_group_size,
+        kv_key_bits,
+        kv_value_bits,
+        kv_key_scheme,
+        kv_value_scheme,
+    )
+    if policy is not None and not policy.is_homogeneous:
+
+        def hybridize(entry):
+            if isinstance(entry, (HybridQuantKVCache, cache.RotatingKVCache)):
+                return entry
+            if getattr(entry, "preserve_auxiliary_kv_state", False):
+                return entry
+            if isinstance(entry, cache.KVCache):
+                if entry.offset >= quantized_kv_start or entry.offset == 0:
+                    built = HybridQuantKVCache(policy)
+                    if entry.offset:
+                        built.update_and_fetch(*entry.state)
+                    return built
+                return entry
+            if isinstance(entry, cache.CacheList):
+                entry.caches = [hybridize(sub) for sub in entry.caches]
+                return entry
+            if isinstance(entry, list):
+                for i, sub in enumerate(entry):
+                    entry[i] = hybridize(sub)
+                return entry
+            if isinstance(entry, tuple):
+                return tuple(hybridize(sub) for sub in entry)
+            return entry
+
+        last_idx = len(prompt_cache) - 1 if len(prompt_cache) > 2 else -1
+        for index, layer_cache in enumerate(prompt_cache):
+            if index == last_idx:
+                continue
+            prompt_cache[index] = hybridize(layer_cache)
         return
 
     if turboquant_enabled(kv_bits, kv_quant_scheme):
@@ -78,13 +163,24 @@ def maybe_quantize_kv_cache(
                 return entry
             if isinstance(entry, cache.RotatingKVCache):
                 return entry
+            if getattr(entry, "preserve_auxiliary_kv_state", False):
+                return entry
             if isinstance(entry, cache.KVCache):
                 if entry.offset == 0:
                     # Empty: replace so update_and_fetch quantizes on the fly
-                    return TurboQuantKVCache(bits=kv_bits)
+                    return TurboQuantKVCache(
+                        bits=kv_bits,
+                        key_bits=kv_key_bits,
+                        value_bits=kv_value_bits,
+                    )
                 if entry.offset < quantized_kv_start:
                     return entry
-                return TurboQuantKVCache.from_cache(entry, bits=kv_bits)
+                return TurboQuantKVCache.from_cache(
+                    entry,
+                    bits=kv_bits,
+                    key_bits=kv_key_bits,
+                    value_bits=kv_value_bits,
+                )
             if isinstance(entry, cache.CacheList):
                 entry.caches = [quantize_entry(sub_entry) for sub_entry in entry.caches]
                 return entry

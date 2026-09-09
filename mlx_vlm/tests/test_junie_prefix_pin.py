@@ -111,7 +111,9 @@ class _FakeDisk:
     def __init__(self):
         self.saved = []
 
-    def save_exact_cache(self, cache_hash, token_ids, extra_hash, prompt_cache):
+    def save_exact_cache(
+        self, cache_hash, token_ids, extra_hash, prompt_cache, pinned=False
+    ):
         self.saved.append((int(cache_hash), tuple(token_ids)))
 
     def has_exact_or_pending(self, cache_hash):
@@ -199,6 +201,9 @@ def test_disk_prunes_exact_snapshots_beyond_cap(monkeypatch, tmp_path):
 
         os.utime(path, (1000 + index, 1000 + index))
         store._exact_index[index] = path
+        # APC_DISK_EXACT_MAX caps the *pinned* pool; unpinned session
+        # snapshots are capped separately by APC_DISK_EXACT_SESSION_MAX.
+        store._exact_pinned.add(index)
         paths.append(path)
 
     assert store._prune_exact_entries() == 2

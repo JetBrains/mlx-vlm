@@ -14,11 +14,7 @@ from ..generate import (
     DEFAULT_TOP_P,
     normalize_resize_shape,
 )
-from ..generate.image import (
-    DEFAULT_IMAGE_GUIDANCE,
-    DEFAULT_IMAGE_SIZE,
-    DEFAULT_IMAGE_STEPS,
-)
+from ..generate.image import DEFAULT_IMAGE_SIZE
 
 
 def get_server_max_tokens():
@@ -47,18 +43,18 @@ class ImageGenerationRequest(FlexibleBaseModel):
     )
     width: Optional[int] = Field(None, description="Generated image width.")
     height: Optional[int] = Field(None, description="Generated image height.")
-    steps: int = Field(
-        DEFAULT_IMAGE_STEPS,
+    steps: Optional[int] = Field(
+        None,
         ge=1,
-        description="Number of image generation inference steps.",
+        description="Number of image generation inference steps; model default if omitted.",
     )
     seed: Optional[int] = Field(
         None,
         description="Base seed. Multiple outputs use (seed + i) values.",
     )
-    guidance: float = Field(
-        DEFAULT_IMAGE_GUIDANCE,
-        description="Classifier-free guidance scale.",
+    guidance: Optional[float] = Field(
+        None,
+        description="Classifier-free guidance scale; model default if omitted.",
     )
     auto_json_caption: Optional[bool] = Field(
         None,
@@ -121,18 +117,18 @@ class ImageEditRequest(FlexibleBaseModel):
     )
     width: Optional[int] = Field(None, description="Edited image width.")
     height: Optional[int] = Field(None, description="Edited image height.")
-    steps: int = Field(
-        DEFAULT_IMAGE_STEPS,
+    steps: Optional[int] = Field(
+        None,
         ge=1,
-        description="Number of image edit inference steps.",
+        description="Number of image edit inference steps; model default if omitted.",
     )
     seed: Optional[int] = Field(
         None,
         description="Base seed. Multiple outputs use (seed + i) values.",
     )
-    guidance: float = Field(
-        DEFAULT_IMAGE_GUIDANCE,
-        description="Classifier-free guidance scale.",
+    guidance: Optional[float] = Field(
+        None,
+        description="Classifier-free guidance scale; model default if omitted.",
     )
     response_format: Literal["b64_json", "path"] = Field(
         "b64_json",
@@ -202,11 +198,9 @@ class ResponseInputImageParam(TypedDict, total=False):
     type: Required[
         Literal["input_image"]
     ]  # The type of the input item. Always `input_image`.
-    image_url: Required[str]
+    image_url: Optional[str]
     file_id: Optional[str]
-    """The ID of the file to be sent to the model.
-     NOTE : wouldn't this help the model if we passed the file_id as well to the vlm models
-    """
+    """A file reference. This server currently rejects file IDs."""
 
 
 class InputAudio(TypedDict, total=False):
@@ -448,13 +442,14 @@ class GenerationTimings(BaseModel):
     predicted_per_token_ms: float
     predicted_per_second: float
     peak_memory: float = 0.0
-    # Speculative decoding (when a drafter is active). draft_n /
-    # draft_n_accepted follow llama.cpp's timings naming and cover ALL
-    # draft sources; the ngram_* fields break out the n-gram prompt-lookup
-    # subset. draft_rounds counts verify passes.
+    # Speculative decoding stats, following the llama.cpp server timings
+    # field names; None unless the request ran with a drafter. draft_n /
+    # draft_n_accepted cover ALL draft sources; the ngram_* fields break out
+    # the n-gram prompt-lookup subset. draft_rounds counts verify passes.
+    draft_kind: Optional[str] = None
+    draft_rounds: Optional[int] = None
     draft_n: Optional[int] = None
     draft_n_accepted: Optional[int] = None
-    draft_rounds: Optional[int] = None
     ngram_n: Optional[int] = None
     ngram_n_accepted: Optional[int] = None
     ngram_rounds: Optional[int] = None
@@ -499,9 +494,14 @@ class GenerationTimings(BaseModel):
             ),
             predicted_per_second=float(generation_tps or 0.0),
             peak_memory=float(metrics.peak_memory or 0.0),
-            draft_n=spec.get("draft_n"),
-            draft_n_accepted=spec.get("draft_n_accepted"),
-            draft_rounds=spec.get("draft_rounds"),
+            draft_kind=getattr(metrics, "draft_kind", None),
+            # spec_stats is the richer per-batch snapshot (it splits out the
+            # n-gram subset); fall back to the flat metrics attributes.
+            draft_rounds=spec.get("draft_rounds", getattr(metrics, "draft_rounds", None)),
+            draft_n=spec.get("draft_n", getattr(metrics, "draft_n", None)),
+            draft_n_accepted=spec.get(
+                "draft_n_accepted", getattr(metrics, "draft_n_accepted", None)
+            ),
             ngram_n=spec.get("ngram_n"),
             ngram_n_accepted=spec.get("ngram_n_accepted"),
             ngram_rounds=spec.get("ngram_rounds"),
