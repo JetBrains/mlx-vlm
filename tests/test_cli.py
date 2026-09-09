@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 
@@ -95,3 +96,113 @@ def test_worker_command_in_a_frozen_bundle(monkeypatch):
 
 def test_the_hardcoded_dispatcher_path_matches_the_real_module():
     assert supervisor.CLI_MODULE == cli.__name__
+
+
+# --- the Junie config generator ------------------------------------------
+
+
+MODEL = "Qwen3.6-27B-MLX-4bit"
+
+# What install.sh saves to <install dir>/models/<model>.json: the Junie id the
+# config is written under, and the junieConfig template to resolve.
+TEMPLATE = {
+    "id": "local-qwen3.6-27b-4bit",
+    "junieConfig": {
+        "displayName": "Qwen 3.6",
+        "id": MODEL,
+        "baseUrl": "http://localhost:$ENGINE_PORT/v1/chat/completions",
+        "apiKey": "$AUTH_TOKEN",
+        "extraBody": {"enable_thinking": False},
+        "stopStrings": ["$AUTH_TOKEN-never"],
+    },
+    "archives": [{"modelId": MODEL}],
+}
+
+
+@pytest.fixture
+def install(tmp_path, monkeypatch):
+    """An install directory and a Junie home, as install.sh leaves them."""
+    install_dir = tmp_path / "junie-local"
+    (install_dir / "models").mkdir(parents=True)
+    (install_dir / "models" / f"{MODEL}.json").write_text(json.dumps(TEMPLATE))
+    (install_dir / "server-config.json").write_text(
+        json.dumps({"api_key": "sk-secret", "port": 12345})
+    )
+    monkeypatch.setenv("JUNIE_SERVER_CONFIG", str(install_dir / "server-config.json"))
+
+    junie_home = tmp_path / "junie-home"
+    junie_home.mkdir()
+    return install_dir, junie_home
+
+
+def test_junie_config_resolves_the_template_and_sets_the_default(install, capsys):
+    install_dir, junie_home = install
+    # Junie's own formatting, which the rewrite has to preserve.
+    settings = junie_home / "settings.json"
+    settings.write_text('{\n    "sessionCount": "48"\n}\n')
+
+    cli.main(["--junie-config", str(junie_home), "--model", MODEL])
+
+    generated = junie_home / "models" / "local-qwen3.6-27b-4bit.json"
+    assert json.loads(generated.read_text()) == {
+        "displayName": "Qwen 3.6",
+        "id": MODEL,
+        "baseUrl": "http://localhost:12345/v1/chat/completions",
+        "apiKey": "sk-secret",
+        "extraBody": {"enable_thinking": False},
+        # Substitution reaches into lists, not only dicts.
+        "stopStrings": ["sk-secret-never"],
+    }
+    # The user's settings keep their other keys, their indentation, and gain
+    # only the default model.
+    assert settings.read_text() == (
+        '{\n    "sessionCount": "48",\n'
+        '    "modelForLaunch": "custom:local-qwen3.6-27b-4bit"\n}\n'
+    )
+    # The template on disk is untouched, so a re-run resolves it again.
+    template = install_dir / "models" / f"{MODEL}.json"
+    assert json.loads(template.read_text()) == TEMPLATE
+    assert "Restart Junie" in capsys.readouterr().out
+
+
+def test_junie_config_warns_but_writes_when_no_token_is_configured(install, capsys):
+    install_dir, junie_home = install
+    # A checkout that never ran install.sh: an open API and no api_key.
+    (install_dir / "server-config.json").write_text(json.dumps({"port": 12345}))
+
+    cli.main(["--junie-config", str(junie_home), "--model", MODEL])
+
+    generated = junie_home / "models" / "local-qwen3.6-27b-4bit.json"
+    assert json.loads(generated.read_text())["apiKey"] == ""
+    assert "no api_key" in capsys.readouterr().err
+
+
+def test_junie_config_without_settings_still_writes_the_model_config(install, capsys):
+    _, junie_home = install
+
+    cli.main(["--junie-config", str(junie_home), "--model", MODEL])
+
+    assert (junie_home / "models" / "local-qwen3.6-27b-4bit.json").is_file()
+    assert not (junie_home / "settings.json").exists()
+    assert "settings not found" in capsys.readouterr().err
+
+
+def test_junie_config_rejects_an_uninstalled_model(install, capsys):
+    _, junie_home = install
+
+    with pytest.raises(SystemExit) as exit_code:
+        cli.main(["--junie-config", str(junie_home), "--model", "Nonexistent"])
+
+    assert exit_code.value.code == 1
+    assert "model config not found" in capsys.readouterr().err
+
+
+def test_junie_config_rejects_a_template_without_a_junie_config(install, capsys):
+    install_dir, junie_home = install
+    (install_dir / "models" / f"{MODEL}.json").write_text(json.dumps({"id": "x"}))
+
+    with pytest.raises(SystemExit) as exit_code:
+        cli.main(["--junie-config", str(junie_home), "--model", MODEL])
+
+    assert exit_code.value.code == 1
+    assert "no junieConfig" in capsys.readouterr().err

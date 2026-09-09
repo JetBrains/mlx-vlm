@@ -23,12 +23,33 @@ Installed separately (by the packaged installer):
   plus their `...-MTP-MLX-4bit` drafters, ~17 GB each pair) — the worker
   loads them from there
   by directory name, offline (HF-hub cache layout by repo id also works);
-- `~/.junie/models/local-qwen3.6-27b-4bit-vlm.json`, the Junie model
-  descriptor pointing at `http://localhost:19239/v1/chat/completions`, and
-  `modelForLaunch` in `~/.junie/settings.json` set to
-  `custom:local-qwen3.6-27b-4bit-vlm`.
+- the model descriptor for each installed model beside those directories,
+  `~/.local/share/junie-local/models/<model>.json` — the file the installer
+  downloads, holding the Junie model id and the `junieConfig` template the
+  engine turns into Junie's own model config (see below).
 
 Restart Junie after either changes.
+
+### The Junie model config
+
+The installer no longer writes Junie's model config itself; the engine does,
+from the descriptor it downloaded:
+
+```bash
+./serverctl.sh --junie-config ~/.junie --model Qwen3.6-27B-MLX-4bit
+```
+
+That reads `~/.local/share/junie-local/models/Qwen3.6-27B-MLX-4bit.json`,
+resolves `$ENGINE_PORT` and `$AUTH_TOKEN` in its `junieConfig` from
+`server-config.json`, writes the result to `~/.junie/models/<id>.json` under
+the descriptor's own `id` (`local-qwen3.6-27b-4bit`), and points
+`modelForLaunch` in `~/.junie/settings.json` at `custom:<id>`. It only writes
+files — start the engine separately with `./serverctl.sh start`. Restart Junie
+afterwards.
+
+`./serverctl.sh uninstall` is the reverse: it reads the ids back out of the
+descriptors still in `models/` and removes exactly those Junie model configs,
+clearing `modelForLaunch` when it names one of them.
 
 ## 3. Start
 
@@ -59,8 +80,8 @@ machine; nothing does so by default.
 
 Stop it with `./serverctl.sh stop`, which releases the model memory.
 
-Model weights and the Junie model descriptor are **not** installed by this
-script — see [Prerequisites](#2-prerequisites).
+Model weights and their descriptors are **not** installed by this script —
+see [Prerequisites](#2-prerequisites).
 
 ## 4. Benchmark (optional)
 
@@ -93,11 +114,12 @@ are fully KV-cached.)
 | `<repo>/research/junie.json` | the stable Junie prompt prefix (system message + tool schemas + first user message); used by `bench.sh`, and the request body `seed_request` expects — not loaded at startup while seeding is disabled |
 | `<repo>/research/junie-replay/` | captured session + replay script used by `bench.sh` |
 | `~/.local/share/junie-local/models/` | model weights, HF-hub layout (`models--mlx-community--Qwen3.6-27B-4bit`, `...-MTP-4bit`); installed separately, relocatable via the `models_dir` setting |
+| `~/.local/share/junie-local/models/<model>.json` | the installed model's descriptor: its Junie model id and the `junieConfig` template `serverctl.sh --junie-config` resolves |
 | `~/.local/share/junie-local/apc-cache/` | APC disk tier — holds pinned snapshots (~1 GB each) so they survive restarts; empty while seeding is disabled |
 | `<repo>/.uv/bin/uv` | `uv` binary (only when not already installed on the machine) |
 | `<repo>/.uv/python/` | uv-managed CPython 3.13 (only when the machine has no suitable Python) |
-| `~/.junie/models/local-qwen3.6-27b-4bit-vlm.json` | Junie model descriptor pointing at this server; installed separately |
-| `~/.junie/settings.json` | existing Junie settings; `modelForLaunch` points at this model |
+| `~/.junie/models/local-qwen3.6-27b-4bit.json` | Junie model config pointing at this server; written by `./serverctl.sh --junie-config` |
+| `~/.junie/settings.json` | existing Junie settings; the same command sets `modelForLaunch` to this model, leaving every other key and the file's formatting alone |
 
 ## Server endpoints
 
@@ -126,6 +148,7 @@ Use the control script instead of hand-written curl commands:
 ./serverctl.sh apply max_context_length=150000
 ./serverctl.sh wait
 ./serverctl.sh stop
+./serverctl.sh --junie-config ~/.junie --model Qwen3.6-27B-MLX-4bit
 ```
 
 Changing only `auto_unload_time` is live. Model, context-limit, and KV-cache

@@ -21,12 +21,19 @@ set -euo pipefail
 #   ./serverctl.sh uninstall                stop the engine and remove everything
 #                                           install.sh set up: the install
 #                                           directory (engine, models, logs,
-#                                           config) and the Junie model config
-#                                           it wrote; only the default install
-#                                           path is supported
+#                                           config) and the Junie model configs
+#                                           generated from it; only the default
+#                                           install path is supported
+#   ./serverctl.sh --junie-config JUNIE_HOME --model MODEL
+#                                           generate the Junie model config file
+#                                           and set this local model as the
+#                                           default; does not start the engine.
+#                                           MODEL is the descriptor's name in
+#                                           the install directory's models/
+#                                           (e.g. Qwen3.6-27B-MLX-4bit)
 #   ./serverctl.sh health | models | metrics | cache-stats | unload
 #
-# Everything but "start" and "uninstall" is plain HTTP, so this drives a
+# Everything but "start", "uninstall" and "--junie-config" is plain HTTP, so this drives a
 # checkout and the frozen junie-mlx-vlm alike. PORT overrides the port read
 # from the config, API_KEY the api_key read from it.
 
@@ -55,6 +62,27 @@ API_KEY="${API_KEY:-$(plutil -extract api_key raw -o - -- "$CONFIG_PATH" 2>/dev/
 
 # The daemon's own output, beside the worker log it writes itself.
 DAEMON_LOG="${CONFIG_PATH%/*}/junie-mlx-vlm-daemon.log"
+
+# Locate the junie-mlx-vlm binary: an unpacked tarball has it beside this
+# script, a checkout has it in the venv that init_dev.sh builds, and it may
+# simply be on PATH. Sets SERVER_BIN to the resolved path or exits with an
+# error message.
+find_server() {
+  for candidate in \
+    "$SCRIPT_DIR/junie-mlx-vlm" \
+    "$SCRIPT_DIR/.venv/bin/junie-mlx-vlm"; do
+    if [ -x "$candidate" ]; then
+      SERVER_BIN="$candidate"
+      return 0
+    fi
+  done
+  SERVER_BIN="$(command -v junie-mlx-vlm || true)"
+  if [ -z "$SERVER_BIN" ]; then
+    echo "ERROR: no junie-mlx-vlm beside this script, in ./.venv/bin or on" >&2
+    echo "       PATH. From a checkout, run ./init_dev.sh first." >&2
+    exit 1
+  fi
+}
 
 usage() {
   sed -n '/^# Usage:/,/^$/{s/^# \{0,1\}//p;}' "${BASH_SOURCE[0]}"
@@ -112,32 +140,15 @@ kv_to_json() {
 }
 
 # The one command that cannot be binary agnostic, because it has to know what
-# to run. It is the same command either way -- an unpacked tarball has the
-# junie-mlx-vlm binary beside this script, a checkout has it in the venv that
-# init_dev.sh builds, and it may simply be on PATH.
+# to run. find_server resolves the binary path; the rest is the same whether
+# it came from an unpacked tarball, a checkout venv, or PATH.
 start_server() {
   if "${CURL[@]}" -o /dev/null -m 2 "$BASE/health" >/dev/null 2>&1; then
     echo "Already serving on port $PORT."
     return 0
   fi
 
-  server=""
-  for candidate in \
-    "$SCRIPT_DIR/junie-mlx-vlm" \
-    "$SCRIPT_DIR/.venv/bin/junie-mlx-vlm"; do
-    if [ -x "$candidate" ]; then
-      server="$candidate"
-      break
-    fi
-  done
-  if [ -z "$server" ]; then
-    server="$(command -v junie-mlx-vlm || true)"
-  fi
-  if [ -z "$server" ]; then
-    echo "ERROR: no junie-mlx-vlm beside this script, in ./.venv/bin or on" >&2
-    echo "       PATH. From a checkout, run ./init_dev.sh first." >&2
-    exit 1
-  fi
+  find_server
 
   # The daemon writes the worker's log itself; this is its own output --
   # its startup lines, uvicorn's, and anything that dies before logging
@@ -148,9 +159,24 @@ start_server() {
   fi
 
   # Detached: the server outlives this shell, and says nothing here.
-  nohup "$server" >"$DAEMON_LOG" 2>&1 &
-  echo "Started $(basename "$server") (pid $!); logging to $DAEMON_LOG"
+  nohup "$SERVER_BIN" >"$DAEMON_LOG" 2>&1 &
+  echo "Started $(basename "$SERVER_BIN") (pid $!); logging to $DAEMON_LOG"
   echo "Follow it with ./serverctl.sh wait"
+}
+
+# Generate the Junie model config file and set this local model as the default
+# in Junie settings. Unlike install.sh, this does not start the engine: it
+# only writes the config files so the user can launch the engine later with
+# `start` or let Junie do it. Delegates all JSON handling to the junie-mlx-vlm
+# Python binary, which reads the model config template from
+# ~/.local/share/junie-local/models/<model>.json, resolves the template
+# variables ($ENGINE_PORT, $AUTH_TOKEN) from server-config.json, and writes
+# the finished config to ~/.junie/models/<id>.json.
+generate_junie_config() {
+  # Forward JUNIE_HOME --model MODEL to the Python binary, which parses them
+  # with argparse (JUNIE_HOME as a positional, --model as a flag).
+  find_server
+  "$SERVER_BIN" --junie-config "$@"
 }
 
 # Undo what install.sh set up: stop the engine, remove the Junie model config
@@ -172,9 +198,6 @@ uninstall_all() {
     exit 1
   fi
 
-  # The exact model id install.sh writes the Junie config under.
-  junie_model_id="local-qwen3.6-27b-4bit"
-  junie_model_config="$HOME/.junie/models/$junie_model_id.json"
   junie_settings="$HOME/.junie/settings.json"
 
   # Stop the engine first, so nothing holds the port or writes to the tree.
@@ -192,15 +215,26 @@ uninstall_all() {
     pkill -f junie-mlx-vlm || true
   fi
 
-  if [ -f "$junie_model_config" ]; then
-    echo "Removing Junie model config $junie_model_config"
-    rm -f "$junie_model_config"
-  fi
+  # Every model install.sh downloaded left its descriptor in models/, and the
+  # "id" in each is the name --junie-config wrote the Junie config under. So
+  # the descriptors still on disk say exactly which Junie configs are ours to
+  # remove -- no id is hardcoded here, and a second installed model is cleaned
+  # up as well. Done before the install directory goes away.
   launch_model="$(plutil -extract modelForLaunch raw -o - -- "$junie_settings" 2>/dev/null || true)"
-  if [ "$launch_model" = "custom:$junie_model_id" ]; then
-    echo "Clearing default model custom:$junie_model_id in $junie_settings"
-    plutil -remove modelForLaunch "$junie_settings" 2>/dev/null || true
-  fi
+  for descriptor in "$HOME/.local/share/junie-local/models"/*.json; do
+    [ -f "$descriptor" ] || continue
+    junie_model_id="$(plutil -extract id raw -o - -- "$descriptor" 2>/dev/null || true)"
+    [ -n "$junie_model_id" ] || continue
+    junie_model_config="$HOME/.junie/models/$junie_model_id.json"
+    if [ -f "$junie_model_config" ]; then
+      echo "Removing Junie model config $junie_model_config"
+      rm -f "$junie_model_config"
+    fi
+    if [ "$launch_model" = "custom:$junie_model_id" ]; then
+      echo "Clearing default model custom:$junie_model_id in $junie_settings"
+      plutil -remove modelForLaunch "$junie_settings" 2>/dev/null || true
+    fi
+  done
 
   if [ -d "$HOME/.local/share/junie-local" ]; then
     echo "Removing $HOME/.local/share/junie-local (engine, models, logs, config)..."
@@ -246,6 +280,10 @@ case "$cmd" in
     ;;
   stop) post /shutdown ;;
   uninstall) uninstall_all ;;
+  --junie-config)
+    [ $# -eq 3 ] || { echo "ERROR: --junie-config requires JUNIE_HOME and --model MODEL" >&2; usage; }
+    generate_junie_config "$@"
+    ;;
   health) get /health ;;
   models) get /v1/models ;;
   metrics) get /metrics ;;
