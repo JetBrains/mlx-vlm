@@ -45,8 +45,12 @@ def post(url, path):
         data=data,
         headers=headers,
     )
-    with urllib.request.urlopen(req, timeout=3600) as resp:
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=3600) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode()
+        sys.exit(f"HTTP {exc.code} from server: {err_body}")
 
 
 def main():
