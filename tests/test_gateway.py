@@ -13,7 +13,7 @@ import mlx_vlm_gateway.supervisor as supervisor_module
 from mlx_vlm_gateway.app import GatewaySettings, create_app
 from mlx_vlm_gateway.memory_monitor import MemorySample
 from mlx_vlm_gateway.supervisor import GATEWAY_PID_ENV
-from mlx_vlm_shared.server_settings import SUPPORTED_MODELS
+from mlx_vlm_shared.server_settings import DEFAULT_CONFIG, SUPPORTED_MODELS
 
 DEFAULT_MODEL, OTHER_MODEL = list(SUPPORTED_MODELS)[:2]
 
@@ -1391,13 +1391,41 @@ def test_worker_does_not_inherit_a_stale_api_key(monkeypatch):
     assert "MLX_VLM_SERVER_API_KEY" not in processes[0].spawn_kwargs["env"]
 
 
-def test_unknown_model_is_rejected_without_touching_the_worker(monkeypatch):
+def test_unknown_model_is_aliased_to_the_configured_model(monkeypatch):
+    captured = []
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler)
+    with TestClient(app) as client:
+        _wait_until(lambda: client.get("/ready").status_code == 200)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "vendor-cloud-model-xl", "messages": []},
+        )
+
+        assert response.status_code == 200
+        assert captured == [{"model": DEFAULT_MODEL, "messages": [], "stream": False}]
+        assert len(processes) == 1
+        assert app.state.supervisor.requests_forwarded == 1
+
+
+def test_unknown_model_is_rejected_without_touching_the_worker(monkeypatch, tmp_path):
     def handler(request):
         if request.url.path == "/ready":
             return httpx.Response(200, json={"status": "ready"})
         raise AssertionError(request.url.path)
 
-    app, processes = _gateway(monkeypatch, handler)
+    config = tmp_path / "server-config.json"
+    config.write_text(json.dumps({**DEFAULT_CONFIG, "model_alias": False}))
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config))
     with TestClient(app) as client:
         _wait_until(lambda: client.get("/ready").status_code == 200)
 

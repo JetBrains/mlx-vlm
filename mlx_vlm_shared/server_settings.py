@@ -74,6 +74,14 @@ DEFAULT_CONFIG = {
     "api_key": None,
     "int8_prefill": True,
     "prefill_step_size": 1024,
+    # Serve chat requests that name a model the gateway does not know with
+    # the configured model instead of answering 404 model_not_found. Coding
+    # agents send whatever id sits in their profile (Junie, Continue,
+    # Cursor) or their built-in defaults (sub-agents ask for their vendor's
+    # cloud model ids), and a 404 leaves them retrying.
+    # Supported model names still switch the worker as before. false keeps
+    # the strict 404.
+    "model_alias": True,
     # Cap on the MLX allocator's freed-buffer cache in GB
     # (MLX_VLM_CACHE_LIMIT_GB). Long prefills leave multi-GB chunk logits
     # and superseded batch caches in that pool; a small cap trims the
@@ -182,6 +190,7 @@ _VALIDATORS = {
         value is None or (isinstance(value, str) and bool(value.strip()))
     ),
     "int8_prefill": lambda value: isinstance(value, bool),
+    "model_alias": lambda value: isinstance(value, bool),
     "prefill_step_size": _is_int_in(1, 1 << 20),
     "mlx_cache_limit_gb": lambda value: value is None or (
         isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
