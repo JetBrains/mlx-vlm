@@ -447,6 +447,13 @@ async def lifespan(app):
         _apply_dequant_prefill()
         logger.info("Dequantize-on-the-fly prefill patch applied.")
 
+    apc_hybrid = os.environ.get("MLX_VLM_APC_HYBRID", "")
+    if apc_hybrid.lower() in ("1", "true", "yes", "on"):
+        from ..apc_hybrid import install as _install_apc_hybrid
+
+        _install_apc_hybrid()
+        logger.info("Hybrid APC (KV blocks + recurrent-state checkpoint ladder) installed.")
+
     int8_prefill = os.environ.get("MLX_VLM_INT8_PREFILL", "")
     if int8_prefill.lower() in ("1", "true", "yes", "on"):
         from ..int8_prefill import apply as _apply_int8_prefill

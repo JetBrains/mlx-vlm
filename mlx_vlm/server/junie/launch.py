@@ -127,6 +127,8 @@ def apply_inference_env(cfg: dict) -> None:
             os.environ[name] = str(value)
 
     set_or_unset("APC_ENABLED", "1" if cfg.get("apc_enabled") else "0")
+    hybrid = bool(cfg.get("apc_hybrid")) and bool(cfg.get("apc_enabled"))
+    set_or_unset("MLX_VLM_APC_HYBRID", "1" if hybrid else None)
     set_or_unset("APC_EXACT_SESSIONS", cfg.get("apc_exact_sessions"))
     set_or_unset("APC_SESSION_CHECKPOINTS", cfg.get("apc_session_checkpoints"))
     # Warm-start straight from live traffic: the chat endpoint pins the KV
@@ -137,7 +139,9 @@ def apply_inference_env(cfg: dict) -> None:
     # such snapshots the disk tier keeps (LRU beyond that); 0 turns the
     # whole mechanism off, and it rides on APC harvesting.
     pin_count = (
-        int(cfg.get("pin_stable_prefix") or 0) if cfg.get("apc_enabled") else 0
+        int(cfg.get("pin_stable_prefix") or 0)
+        if cfg.get("apc_enabled") and not hybrid
+        else 0
     )
     set_or_unset("MLX_VLM_PIN_STABLE_PREFIX", pin_count if pin_count > 0 else None)
     set_or_unset("APC_DISK_EXACT_MAX", pin_count if pin_count > 0 else None)

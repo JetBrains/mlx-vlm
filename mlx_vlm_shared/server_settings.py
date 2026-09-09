@@ -99,6 +99,12 @@ DEFAULT_CONFIG = {
     "pin_stable_prefix": 5,
     "log_raw_tokens": False,
     "apc_enabled": True,
+    # Hybrid APC (mlx_vlm/apc_hybrid.py): attention K/V in shared 256-token
+    # blocks plus a ladder of recurrent-state checkpoints from the end of
+    # the prompt, instead of whole-cache exact snapshots. Continued
+    # conversations recompute only their tail and the disk tier holds
+    # blocks once. Needs apc_enabled; bypasses pin_stable_prefix.
+    "apc_hybrid": False,
     "apc_exact_sessions": 2,
     "apc_session_checkpoints": 4,
     # How many growing conversations (each request a superset prefix of the
@@ -199,6 +205,7 @@ _VALIDATORS = {
     "pin_stable_prefix": _is_int_in(0, 64),
     "log_raw_tokens": lambda value: isinstance(value, bool),
     "apc_enabled": lambda value: isinstance(value, bool),
+    "apc_hybrid": lambda value: isinstance(value, bool),
     "apc_exact_sessions": _is_int_in(0, 64),
     "apc_session_checkpoints": _is_int_in(1, 64),
     "apc_max_growing_sessions": _is_int_in(0, 64),
