@@ -6,6 +6,10 @@ set -euo pipefail
 # prefill speed over new tokens, generation speed, speculative acceptance —
 # and their means. Stats come from the response "timings" blocks, so this
 # works however the server was started.
+#
+# Usage:
+#   ./bench.sh                              # use model from request files
+#   ./bench.sh --model Qwen3.8-27B-MLX-4bit  # override model for benchmarking
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

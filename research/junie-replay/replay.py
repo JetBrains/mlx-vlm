@@ -18,7 +18,10 @@ session/disk reuse for prefill, MTP + prompt-lookup speculation for decode.
 
 Usage (server must be running, e.g. via start.sh):
   python research/junie-replay/replay.py [--url http://localhost:8085]
-      [--requests research/junie-replay/requests]
+      [--model Qwen3.8-27B-MLX-4bit] [--requests research/junie-replay/requests]
+
+The --model flag overrides the model name in every request, letting you
+benchmark a different model than the one captured in the request files.
 
 A server started from a config with an "api_key" rejects requests without
 it; pass the same key in MLX_VLM_SERVER_API_KEY (bench.sh does it for you).
@@ -31,10 +34,12 @@ import sys
 import urllib.request
 
 
-def post(url, path):
+def post(url, path, model=None):
     with open(path) as f:
         body = json.load(f)
     body["stream"] = False
+    if model:
+        body["model"] = model
     data = json.dumps(body).encode()
     headers = {"Content-Type": "application/json"}
     api_key = os.environ.get("MLX_VLM_SERVER_API_KEY")
@@ -57,6 +62,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8085")
     ap.add_argument(
+        "--model",
+        default=None,
+        help="Override the model name in all requests (e.g. Qwen3.8-27B-MLX-4bit)",
+    )
+    ap.add_argument(
         "--requests",
         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "requests"),
     )
@@ -75,7 +85,7 @@ def main():
     warm_up = os.path.join(args.requests, "warm_up.json")
     if os.path.exists(warm_up):
         print(f"warming up with {os.path.basename(warm_up)}...", flush=True)
-        post(args.url, warm_up)
+        post(args.url, warm_up, model=args.model)
         files = [f for f in files if os.path.basename(f) != "warm_up.json"]
 
     totals = {
@@ -86,7 +96,7 @@ def main():
     }
 
     for path in files:
-        response = post(args.url, path)
+        response = post(args.url, path, model=args.model)
         usage = response.get("usage") or {}
         timings = response.get("timings") or {}
         prompt = int(usage.get("prompt_tokens") or 0)
