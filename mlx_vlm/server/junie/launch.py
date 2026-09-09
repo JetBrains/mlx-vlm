@@ -235,5 +235,16 @@ def main() -> None:
     cfg = load_config()
     initialize_from_config(cfg)
     apply_inference_env(cfg)
+
+    # The module-level ServerRuntime() snapshots APC_ENABLED & co. via
+    # RuntimeConfig.from_env when mlx_vlm.server is first imported — which
+    # happens before this function runs (importing this launcher already
+    # imports the package). Re-snapshot now that the env is exported, so the
+    # config-file settings actually reach the runtime.
+    from ..runtime import runtime as server_runtime
+    from ..runtime_config import RuntimeConfig
+
+    server_runtime.config = RuntimeConfig.from_env()
+
     sys.argv = [sys.argv[0], *build_argv(cfg)]
     cli_main()
