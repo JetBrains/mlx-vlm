@@ -1093,11 +1093,20 @@ def _target_verify_singletons(fn, x: mx.array) -> mx.array:
     return mx.concatenate(rows, axis=0)
 
 
-def _target_verify_linear(linear, x: mx.array) -> mx.array:
+def _native_single_row(x: mx.array, exact_single: bool) -> bool:
+    # A single row has no batch to stay invariant with: MLX's native quantized
+    # matmul is faster than the singleton-exact kernels, so quantized layers
+    # skip them unless singleton-exact results are explicitly requested.
+    return x.shape[0] == 1 and not exact_single
+
+
+def _target_verify_linear(linear, x: mx.array, exact_single: bool = True) -> mx.array:
     if not _use_target_verify_dense(linear, x):
         return linear(x)
 
     if isinstance(linear, nn.QuantizedLinear):
+        if _native_single_row(x, exact_single):
+            return linear(x)
         out = _target_verify_quantized_linear(linear, x)
         if out is not None:
             return out
@@ -1165,7 +1174,7 @@ def _target_verify_quantized_linears(linears, x: mx.array):
     return tuple(mx.split(out, split_indices, axis=-1))
 
 
-def _target_verify_linears(linears, x: mx.array):
+def _target_verify_linears(linears, x: mx.array, exact_single: bool = True):
     if not (
         x.ndim == 3
         and (x.shape[0] > 1 or x.shape[1] > 1)
@@ -1180,10 +1189,11 @@ def _target_verify_linears(linears, x: mx.array):
             return out
         return tuple(linear(x) for linear in linears)
 
-    out = _target_verify_quantized_linears(linears, x)
-    if out is not None:
-        return out
-    return tuple(_target_verify_linear(linear, x) for linear in linears)
+    if not _native_single_row(x, exact_single):
+        out = _target_verify_quantized_linears(linears, x)
+        if out is not None:
+            return out
+    return tuple(_target_verify_linear(linear, x, exact_single) for linear in linears)
 
 
 def _target_verify_embedding_as_linear(embedding, x: mx.array):
@@ -1200,6 +1210,10 @@ def _target_verify_embedding_as_linear(embedding, x: mx.array):
 class Qwen3_5BatchInvariantForward:
     """Run Qwen3.5 rows with singleton-equivalent reductions."""
 
+    # Keep quantized reductions singleton-equivalent even for a single row;
+    # see Qwen3_5ExactSpeculativeVerifier.
+    exact_single = True
+
     @staticmethod
     def _helpers():
         # Imported lazily because language.py owns the shared cache and ragged
@@ -1209,10 +1223,10 @@ class Qwen3_5BatchInvariantForward:
         return language
 
     def _linear(self, linear, x: mx.array) -> mx.array:
-        return _target_verify_linear(linear, x)
+        return _target_verify_linear(linear, x, self.exact_single)
 
     def _linears(self, linears, x: mx.array):
-        return _target_verify_linears(linears, x)
+        return _target_verify_linears(linears, x, self.exact_single)
 
     def _embedding_as_linear(self, embedding, x: mx.array) -> mx.array:
         return _target_verify_embedding_as_linear(embedding, x)
@@ -1615,7 +1629,12 @@ class Qwen3_5BatchInvariantForward:
         )
 
 
-Qwen3_5ExactSpeculativeVerifier = Qwen3_5BatchInvariantForward
+class Qwen3_5ExactSpeculativeVerifier(Qwen3_5BatchInvariantForward):
+    """Speculative verification only needs the rows of one batch to agree with
+    each other, so a single stream keeps MLX's faster native quantized
+    matmuls instead of the singleton-exact kernels."""
+
+    exact_single = False
 
 
 __all__ = ["Qwen3_5BatchInvariantForward", "Qwen3_5ExactSpeculativeVerifier"]

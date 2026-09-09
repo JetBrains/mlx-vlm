@@ -619,9 +619,14 @@ def test_qwen_gdn_verify_update_matches_stepwise_path():
     assert all(bool(mx.array_equal(a, b).item()) for a, b in zip(ref, out))
 
 
-def test_qwen_gdn_verify_can_omit_the_live_final_state():
+@pytest.mark.parametrize("batch", [1, 2, 3])
+@pytest.mark.parametrize("masked", [False, True])
+def test_qwen_gdn_verify_can_omit_the_live_final_state(batch, masked):
+    # batch > 1 also pins the kernel's states row stride: rows were indexed by
+    # the full sequence length T instead of StateT, shifting every row past
+    # the first and writing the last row out of bounds.
     mx.random.seed(27)
-    B, S, Hk, D, Hv, Dv = 1, 3, 2, 64, 4, 16
+    B, S, Hk, D, Hv, Dv = batch, 3, 2, 64, 4, 16
     q = mx.random.normal((B, S, Hk, D)).astype(mx.bfloat16)
     k = mx.random.normal((B, S, Hk, D)).astype(mx.bfloat16)
     v = mx.random.normal((B, S, Hv, Dv)).astype(mx.bfloat16)
@@ -630,12 +635,13 @@ def test_qwen_gdn_verify_can_omit_the_live_final_state():
     A_log = mx.random.normal((Hv,)).astype(mx.bfloat16)
     dt_bias = mx.ones((Hv,), dtype=mx.bfloat16)
     state = mx.zeros((B, Hv, Dv, D), dtype=mx.float32)
+    mask = (mx.random.uniform(shape=(B, S)) > 0.3) if masked else None
 
     full = qwen_verifier.gated_delta_update_with_states(
-        q, k, v, a, b, A_log, dt_bias, state, state_steps=S
+        q, k, v, a, b, A_log, dt_bias, state, mask=mask, state_steps=S
     )
     shortened = qwen_verifier.gated_delta_update_with_states(
-        q, k, v, a, b, A_log, dt_bias, state, state_steps=S - 1
+        q, k, v, a, b, A_log, dt_bias, state, mask=mask, state_steps=S - 1
     )
     mx.eval(*full, *shortened)
 
@@ -726,6 +732,23 @@ def test_qwen_target_verify_4bit_linear_matches_singleton_path_exactly(
     mx.eval(ref, out)
 
     assert bool(mx.array_equal(ref, out).item())
+
+
+@pytest.mark.parametrize("verify_length", [3, 6, 8])
+def test_qwen_target_verify_single_row_uses_native_matmul(verify_length):
+    # The speculative verifier (exact_single=False) has no batch to stay
+    # invariant with at B == 1 and must fall back to MLX's native quantized
+    # matmul, which is measurably faster than the singleton-exact kernels.
+    mx.random.seed(41 + verify_length)
+    linear = nn.QuantizedLinear(512, 16, bias=False, group_size=64, bits=4)
+    linear.scales = linear.scales.astype(mx.bfloat16)
+    linear.biases = linear.biases.astype(mx.bfloat16)
+    x = mx.random.normal((1, verify_length, 512)).astype(mx.bfloat16)
+
+    out = qwen_verifier._target_verify_linear(linear, x, exact_single=False)
+    mx.eval(out)
+
+    assert bool(mx.array_equal(linear(x), out).item())
 
 
 @pytest.mark.parametrize("output_dims", [(16, 24), (16, 24, 32), (8, 16, 24, 32)])

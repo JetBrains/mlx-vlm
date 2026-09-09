@@ -1831,8 +1831,20 @@ class PromptProcessingBatch:
             )
             self._cached_tokens_per_row.append(prefix_len)
 
+        plain_single_row = (
+            len(input_ids) == 1
+            and right_pad_per_row is None
+            and kv_bits is None
+            and hasattr(model, "make_cache")
+        )
         if warm_cache is not None:
             self.prompt_cache = warm_cache
+        elif plain_single_row and (draft_model is None or draft_kind in (None, "mtp")):
+            # A single unquantized row decodes fastest on the model's plain
+            # single-sequence caches, MTP verification included: batch caches
+            # answer make_mask with a materialized array instead of "causal",
+            # which pushes the verify attention off the fused SDPA path.
+            self.prompt_cache = cache.make_prompt_cache(model)
         elif draft_model is not None and draft_kind is not None:
             self.prompt_cache = make_speculative_prompt_cache(
                 model,
@@ -1853,13 +1865,6 @@ class PromptProcessingBatch:
                     prefill_length=max_length,
                 ),
             )
-        elif (
-            len(input_ids) == 1
-            and right_pad_per_row is None
-            and kv_bits is None
-            and hasattr(model, "make_cache")
-        ):
-            self.prompt_cache = cache.make_prompt_cache(model)
         else:
             self.prompt_cache = _make_cache(
                 model,
