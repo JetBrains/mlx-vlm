@@ -89,6 +89,7 @@ def apply_config_to_env(cfg: dict) -> None:
         DEFAULT_KV_QUANT_BITS if cfg.get("kv_quantization") else None,
     )
     set_or_unset("MLX_VLM_SOFT_REQUEST_TIMEOUT", cfg.get("soft_request_timeout"))
+    set_or_unset("MLX_VLM_CACHE_LIMIT_GB", cfg.get("mlx_cache_limit_gb"))
     # The gateway owns idle timing and stops the whole worker process.
     os.environ.pop("MLX_VLM_AUTO_UNLOAD_TIME", None)
 

@@ -74,6 +74,12 @@ DEFAULT_CONFIG = {
     "api_key": None,
     "int8_prefill": True,
     "prefill_step_size": 1024,
+    # Cap on the MLX allocator's freed-buffer cache in GB
+    # (MLX_VLM_CACHE_LIMIT_GB). Long prefills leave multi-GB chunk logits
+    # and superseded batch caches in that pool; a small cap trims the
+    # process peak by ~15 GB on a 27B model at no measurable speed cost.
+    # null keeps the MLX default (no cap).
+    "mlx_cache_limit_gb": 3,
     "preserve_thinking": True,
     # How many stable Junie prompt prefixes (the messages before the
     # issue-description message) to keep pinned: each one's KV is
@@ -177,6 +183,9 @@ _VALIDATORS = {
     ),
     "int8_prefill": lambda value: isinstance(value, bool),
     "prefill_step_size": _is_int_in(1, 1 << 20),
+    "mlx_cache_limit_gb": lambda value: value is None or (
+        isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    ),
     "preserve_thinking": lambda value: isinstance(value, bool),
     "pin_stable_prefix": _is_int_in(0, 64),
     "log_raw_tokens": lambda value: isinstance(value, bool),
