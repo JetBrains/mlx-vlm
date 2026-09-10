@@ -10,6 +10,7 @@ set -euo pipefail
 # Usage:
 #   ./bench.sh                              # use model from request files
 #   ./bench.sh --model Qwen3.8-27B-MLX-4bit  # override model for benchmarking
+#   ./bench.sh --reasoning-effort low       # set reasoning_effort (auto-enables thinking)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

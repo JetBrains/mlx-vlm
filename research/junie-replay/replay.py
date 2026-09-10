@@ -18,10 +18,13 @@ session/disk reuse for prefill, MTP + prompt-lookup speculation for decode.
 
 Usage (server must be running, e.g. via start.sh):
   python research/junie-replay/replay.py [--url http://localhost:8085]
-      [--model Qwen3.8-27B-MLX-4bit] [--requests research/junie-replay/requests]
+      [--model Qwen3.8-27B-MLX-4bit] [--reasoning-effort low]
+      [--requests research/junie-replay/requests]
 
 The --model flag overrides the model name in every request, letting you
 benchmark a different model than the one captured in the request files.
+The --reasoning-effort flag sets reasoning_effort in all requests; non-'none'
+values also set enable_thinking=true. Choices: none, low, medium, xhigh.
 
 A server started from a config with an "api_key" rejects requests without
 it; pass the same key in MLX_VLM_SERVER_API_KEY (bench.sh does it for you).
@@ -34,12 +37,16 @@ import sys
 import urllib.request
 
 
-def post(url, path, model=None):
+def post(url, path, model=None, reasoning_effort=None):
     with open(path) as f:
         body = json.load(f)
     body["stream"] = False
     if model:
         body["model"] = model
+    if reasoning_effort:
+        body["reasoning_effort"] = reasoning_effort
+        if reasoning_effort != "none":
+            body["enable_thinking"] = True
     data = json.dumps(body).encode()
     headers = {"Content-Type": "application/json"}
     api_key = os.environ.get("MLX_VLM_SERVER_API_KEY")
@@ -67,6 +74,12 @@ def main():
         help="Override the model name in all requests (e.g. Qwen3.8-27B-MLX-4bit)",
     )
     ap.add_argument(
+        "--reasoning-effort",
+        default=None,
+        choices=["none", "low", "medium", "xhigh"],
+        help="Set reasoning_effort in all requests. Non-'none' values also enable thinking.",
+    )
+    ap.add_argument(
         "--requests",
         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "requests"),
     )
@@ -85,7 +98,7 @@ def main():
     warm_up = os.path.join(args.requests, "warm_up.json")
     if os.path.exists(warm_up):
         print(f"warming up with {os.path.basename(warm_up)}...", flush=True)
-        post(args.url, warm_up, model=args.model)
+        post(args.url, warm_up, model=args.model, reasoning_effort=args.reasoning_effort)
         files = [f for f in files if os.path.basename(f) != "warm_up.json"]
 
     totals = {
@@ -96,7 +109,7 @@ def main():
     }
 
     for path in files:
-        response = post(args.url, path, model=args.model)
+        response = post(args.url, path, model=args.model, reasoning_effort=args.reasoning_effort)
         usage = response.get("usage") or {}
         timings = response.get("timings") or {}
         prompt = int(usage.get("prompt_tokens") or 0)
