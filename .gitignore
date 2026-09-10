@@ -30,3 +30,6 @@ var/
 .vscode
 # JetBrains IDE
 .idea/
+
+# Private Comino replay exports (fetch_requests.py).
+/research/junie-replay/requests-local*/
