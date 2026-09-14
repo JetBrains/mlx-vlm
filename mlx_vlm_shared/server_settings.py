@@ -122,13 +122,45 @@ DEFAULT_CONFIG = {
 DEFAULT_PUBLIC_SETTINGS = {key: DEFAULT_CONFIG[key] for key in PUBLIC_SETTING_KEYS}
 DEFAULT_DRAFT_MODEL = DEFAULT_CONFIG["draft_model"]
 
-# The models the server can serve, each paired with its MTP drafter. Both
-# live in "models_dir" with the same layout. A chat request naming one of
-# these gets the worker (re)loaded with it; any other name is rejected.
-SUPPORTED_MODELS = {
-    "Qwen3.6-27B-MLX-4bit": "Qwen3.6-27B-MTP-MLX-4bit",
-    "Qwen3.8-27B-MLX-4bit": "Qwen3.8-27B-MTP-MLX-4bit",
-}
+
+def discover_supported_models(models_dir: Optional[str] = None) -> dict:
+    """The models the server can serve, each with its paired drafter.
+
+    install.sh drops a descriptor for every installed model at
+    "<models_dir>/<model-id>.json", with "draft_model" and "draft_kind"
+    fields naming its paired drafter (see
+    mlx_vlm_gateway.cli.run_junie_config, which reads the same file for its
+    "junieConfig"). Scanning it here means a model becomes servable the
+    moment its archive is installed -- no code change needed -- and a chat
+    request naming any other id is rejected. Nothing is builtin: an
+    empty/missing models_dir supports no model.
+
+    Returns model id -> {"draft_model": str, "draft_kind": str or None}.
+    """
+    models = {}
+    directory = os.path.expanduser(models_dir or DEFAULT_CONFIG["models_dir"])
+    try:
+        entries = sorted(os.listdir(directory))
+    except OSError:
+        return models
+    for entry in entries:
+        if not entry.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, entry), encoding="utf-8") as stream:
+                descriptor = json.load(stream)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(descriptor, dict):
+            continue
+        drafter = descriptor.get("draft_model")
+        if isinstance(drafter, str) and drafter.strip():
+            kind = descriptor.get("draft_kind")
+            models[entry[: -len(".json")]] = {
+                "draft_model": drafter,
+                "draft_kind": kind if isinstance(kind, str) and kind.strip() else None,
+            }
+    return models
 
 
 def _is_positive_int_or_none(value) -> bool:

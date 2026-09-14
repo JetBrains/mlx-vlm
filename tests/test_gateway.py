@@ -3,19 +3,45 @@ import json
 import os
 import signal
 import sys
+import tempfile
 import threading
 import time
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 import mlx_vlm_gateway.supervisor as supervisor_module
 from mlx_vlm_gateway.app import GatewaySettings, create_app
 from mlx_vlm_gateway.memory_monitor import MemorySample
 from mlx_vlm_gateway.supervisor import GATEWAY_PID_ENV
-from mlx_vlm_shared.server_settings import DEFAULT_CONFIG, SUPPORTED_MODELS
+from mlx_vlm_shared.server_settings import DEFAULT_CONFIG
 
-DEFAULT_MODEL, OTHER_MODEL = list(SUPPORTED_MODELS)[:2]
+# SUPPORTED_MODELS is discovered from descriptor files in models_dir (see
+# discover_supported_models); nothing is builtin. These two synthetic
+# descriptors give the tests a stable, hermetic set to switch between,
+# independent of whatever real models happen to be installed on the
+# machine running them.
+DEFAULT_MODEL, OTHER_MODEL = "test-model-a", "test-model-b"
+SUPPORTED_MODELS = {
+    DEFAULT_MODEL: f"{DEFAULT_MODEL}-mtp",
+    OTHER_MODEL: f"{OTHER_MODEL}-mtp",
+}
+_MODELS_FIXTURE_DIR = tempfile.mkdtemp(prefix="mlx-vlm-test-models-")
+for _name, _drafter in SUPPORTED_MODELS.items():
+    with open(os.path.join(_MODELS_FIXTURE_DIR, f"{_name}.json"), "w") as _f:
+        json.dump({"draft_model": _drafter}, _f)
+
+
+@pytest.fixture(autouse=True)
+def _default_models_dir(monkeypatch):
+    """Point the "no config file" default models_dir at the fixture above.
+
+    SettingsStore(None) and any config file that omits "models_dir" fall
+    back to DEFAULT_CONFIG["models_dir"]; patching it here keeps every test
+    in this module hermetic without touching each one individually.
+    """
+    monkeypatch.setitem(DEFAULT_CONFIG, "models_dir", _MODELS_FIXTURE_DIR)
 
 
 class FakeProcess:
@@ -481,7 +507,7 @@ def test_config_save_failure_keeps_worker_running(monkeypatch, tmp_path):
 
 
 def test_applying_current_settings_is_a_noop(monkeypatch, tmp_path):
-    model = "Qwen3.8-27B-MLX-4bit"
+    model = DEFAULT_MODEL
     config_path = tmp_path / "server-config.json"
     current = {
         "model_name": model,
@@ -1392,13 +1418,16 @@ def test_worker_does_not_inherit_a_stale_api_key(monkeypatch):
     assert "MLX_VLM_SERVER_API_KEY" not in processes[0].spawn_kwargs["env"]
 
 
-def test_unknown_model_is_rejected_without_touching_the_worker(monkeypatch):
+def test_unknown_model_is_rejected_without_touching_the_worker(monkeypatch, tmp_path):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(json.dumps({"models_dir": _MODELS_FIXTURE_DIR}))
+
     def handler(request):
         if request.url.path == "/ready":
             return httpx.Response(200, json={"status": "ready"})
         raise AssertionError(request.url.path)
 
-    app, processes = _gateway(monkeypatch, handler)
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
         _wait_until(lambda: client.get("/ready").status_code == 200)
 
@@ -1418,7 +1447,11 @@ def test_unknown_model_is_rejected_without_touching_the_worker(monkeypatch):
 
 def test_request_for_other_model_reloads_idle_worker(monkeypatch, tmp_path):
     config_path = tmp_path / "server-config.json"
-    config_path.write_text(json.dumps({"model_name": DEFAULT_MODEL}))
+    config_path.write_text(
+        json.dumps(
+            {"model_name": DEFAULT_MODEL, "models_dir": _MODELS_FIXTURE_DIR}
+        )
+    )
     captured = []
 
     def handler(request):

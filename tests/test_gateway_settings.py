@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 
 import pytest
 
@@ -17,6 +18,37 @@ from mlx_vlm_shared.server_settings import (
     DEFAULT_CONFIG_PATH,
     config_path,
 )
+
+# SUPPORTED_MODELS is discovered from descriptor files in models_dir; these
+# two match DEFAULT_CONFIG's own model_name/draft_model so a SettingsStore
+# with no config file (or one that omits models_dir) can still validate and
+# switch between them, hermetically, regardless of what is really installed
+# on the machine running the tests.
+_MODELS_FIXTURE_DIR = tempfile.mkdtemp(prefix="mlx-vlm-test-models-")
+_FIXTURE_DESCRIPTORS = {
+    "Qwen3.6-27B-MLX-4bit": {
+        "draft_model": "Qwen3.6-27B-MTP-MLX-4bit",
+        "draft_kind": "mtp",
+    },
+    "Qwen3.8-27B-MLX-4bit": {
+        "draft_model": "Qwen3.8-27B-MTP-MLX-4bit",
+        "draft_kind": "mtp",
+    },
+    # A different draft_kind than the other two, so a test can prove
+    # switching models also switches draft_kind and not just draft_model.
+    "test-dflash-model": {
+        "draft_model": "test-dflash-drafter",
+        "draft_kind": "dflash",
+    },
+}
+for _name, _descriptor in _FIXTURE_DESCRIPTORS.items():
+    with open(os.path.join(_MODELS_FIXTURE_DIR, f"{_name}.json"), "w") as _f:
+        json.dump(_descriptor, _f)
+
+
+@pytest.fixture(autouse=True)
+def _default_models_dir(monkeypatch):
+    monkeypatch.setitem(DEFAULT_CONFIG, "models_dir", _MODELS_FIXTURE_DIR)
 
 
 def test_config_path_defaults_to_the_shared_location(monkeypatch):
@@ -204,7 +236,7 @@ def test_settings_are_validated_once_and_then_read_from_memory(tmp_path):
         (
             {"model_name": "other-model"},
             "Unsupported model. Available models: "
-            "Qwen3.6-27B-MLX-4bit, Qwen3.8-27B-MLX-4bit",
+            "Qwen3.6-27B-MLX-4bit, Qwen3.8-27B-MLX-4bit, test-dflash-model",
         ),
         (
             {"max_context_length": 0},
@@ -258,3 +290,22 @@ def test_saving_a_supported_model_switches_its_drafter_too(tmp_path):
     assert settings["model_name"] == "Qwen3.8-27B-MLX-4bit"
     persisted = json.loads(path.read_text())
     assert persisted["draft_model"] == "Qwen3.8-27B-MTP-MLX-4bit"
+    assert persisted["draft_kind"] == "mtp"
+
+
+def test_saving_a_supported_model_switches_its_draft_kind_too(tmp_path):
+    """A model whose draft_kind differs from the config's current one (dflash
+    vs. the default mtp) must overwrite it, not merely default it in -- a
+    stale draft_kind from the previous model would run the wrong
+    speculative-decode path against the new drafter."""
+    path = tmp_path / "server-config.json"
+    store = SettingsStore(str(path))
+    assert store.current()["model_name"] == "Qwen3.6-27B-MLX-4bit"
+
+    updates, _ = store.validate({"model_name": "test-dflash-model"})
+    settings = store.save(updates)
+
+    assert settings["model_name"] == "test-dflash-model"
+    persisted = json.loads(path.read_text())
+    assert persisted["draft_model"] == "test-dflash-drafter"
+    assert persisted["draft_kind"] == "dflash"

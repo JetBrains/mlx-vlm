@@ -10,7 +10,7 @@ from mlx_vlm_shared.server_settings import (
     DEFAULT_PUBLIC_SETTINGS,
     PUBLIC_SETTING_KEYS,
     RESTART_SETTING_KEYS,
-    SUPPORTED_MODELS,
+    discover_supported_models,
     is_valid_setting,
     normalize_config,
 )
@@ -97,6 +97,9 @@ class SettingsStore:
     def draft_model(self) -> Optional[str]:
         return self._config.get("draft_model", DEFAULT_DRAFT_MODEL)
 
+    def models_dir(self) -> str:
+        return self._config.get("models_dir", DEFAULT_CONFIG["models_dir"])
+
     def validate(self, body) -> tuple[dict, bool]:
         if not isinstance(body, dict):
             raise SettingsValidationError("Request body must be a JSON object.")
@@ -118,10 +121,11 @@ class SettingsStore:
                     '"model_name" must be a non-empty string.'
                 )
             updates["model_name"] = value.strip()
-            if updates["model_name"] not in SUPPORTED_MODELS:
+            supported = discover_supported_models(self.models_dir())
+            if updates["model_name"] not in supported:
                 raise SettingsValidationError(
                     "Unsupported model. Available models: "
-                    f"{', '.join(SUPPORTED_MODELS)}"
+                    f"{', '.join(supported)}"
                 )
 
         for key in ("max_context_length", "auto_unload_time"):
@@ -137,12 +141,18 @@ class SettingsStore:
         return updates, force
 
     def save(self, updates: dict) -> dict:
-        # A supported model always runs with its paired drafter; switching
-        # one without the other would feed the verify pass a mismatched MTP
-        # head.
-        drafter = SUPPORTED_MODELS.get(updates.get("model_name"))
-        if drafter is not None and "draft_model" not in updates:
-            updates = {**updates, "draft_model": drafter}
+        # A supported model always runs with its paired drafter and draft
+        # kind; switching model without them would feed the verify pass a
+        # mismatched MTP head, or run the wrong speculative-decode path
+        # against the new drafter.
+        supported = discover_supported_models(self.models_dir()).get(
+            updates.get("model_name")
+        )
+        if supported is not None:
+            updates = dict(updates)
+            updates.setdefault("draft_model", supported["draft_model"])
+            if supported["draft_kind"] is not None:
+                updates.setdefault("draft_kind", supported["draft_kind"])
         config, invalid = normalize_config({**self._config, **updates})
         if invalid:
             raise SettingsValidationError(f"Invalid settings: {sorted(invalid)}")

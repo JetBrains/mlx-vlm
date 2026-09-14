@@ -24,8 +24,8 @@ from mlx_vlm_shared.errors import (
 from mlx_vlm_shared.server_settings import (
     CONFIG_PATH_ENV,
     DEFAULT_CONFIG_PATH,
-    SUPPORTED_MODELS,
     config_path,
+    discover_supported_models,
     load_config,
 )
 
@@ -556,9 +556,10 @@ def create_app(
         # An absent model field means "whatever is configured".
         requested_model = payload.get("model")
         store = settings_store(request)
+        supported_models = discover_supported_models(store.models_dir())
         if (
             requested_model
-            and requested_model not in SUPPORTED_MODELS
+            and requested_model not in supported_models
             and requested_model != store.current()["model_name"]
         ):
             return JSONResponse(
@@ -567,7 +568,7 @@ def create_app(
                     "error": {
                         "message": (
                             f"Model '{requested_model}' not found. Available "
-                            f"models: {', '.join(SUPPORTED_MODELS)}."
+                            f"models: {', '.join(supported_models)}."
                         ),
                         "type": "invalid_request_error",
                         "code": "model_not_found",
