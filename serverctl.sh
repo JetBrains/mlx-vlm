@@ -18,12 +18,22 @@ set -euo pipefail
 #                                           anything else as a JSON string
 #   ./serverctl.sh apply-json '{"max_context_length": 150000}'
 #   ./serverctl.sh stop                     POST /shutdown (graceful)
-#   ./serverctl.sh uninstall                stop the engine and remove everything
-#                                           install.sh set up: the install
-#                                           directory (engine, models, logs,
-#                                           config) and the Junie model configs
-#                                           generated from it; only the default
-#                                           install path is supported
+#   ./serverctl.sh uninstall MODEL          remove one installed model (its
+#                                           weights, paired drafter if no
+#                                           other model still needs it, and
+#                                           the Junie model config generated
+#                                           for it), keeping the engine and
+#                                           every other installed model
+#                                           running; refuses when MODEL is
+#                                           the only one installed -- use
+#                                           uninstallAll for that
+#   ./serverctl.sh uninstallAll             stop the engine and remove
+#                                           everything install.sh set up: the
+#                                           install directory (engine,
+#                                           models, logs, config) and the
+#                                           Junie model configs generated
+#                                           from it; only the default install
+#                                           path is supported
 #   ./serverctl.sh --junie-config JUNIE_HOME --model MODEL
 #                                           generate the Junie model config file
 #                                           and set this local model as the
@@ -33,9 +43,10 @@ set -euo pipefail
 #                                           (e.g. Qwen3.6-27B-MLX-4bit)
 #   ./serverctl.sh health | models | metrics | cache-stats | unload
 #
-# Everything but "start", "uninstall" and "--junie-config" is plain HTTP, so this drives a
-# checkout and the frozen junie-mlx-vlm alike. PORT overrides the port read
-# from the config, API_KEY the api_key read from it.
+# Everything but "start", "uninstall", "uninstallAll" and "--junie-config" is
+# plain HTTP, so this drives a checkout and the frozen junie-mlx-vlm alike.
+# PORT overrides the port read from the config, API_KEY the api_key read
+# from it.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -246,6 +257,104 @@ uninstall_all() {
   echo "Uninstall complete. Restart Junie to apply the changes."
 }
 
+# Remove one installed model without touching the engine or any other
+# installed model. MODEL is a descriptor's filename stem under
+# ~/.local/share/junie-local/models (the same id discover_supported_models()
+# in mlx_vlm_shared/server_settings.py uses), and its weight directory and
+# the draft model's are each assumed to be named after their own archive's
+# "modelId" -- true of every install.sh layout seen so far, and how the
+# Python side already keys models_dir.
+#
+# Junie (junie-agent's LocalEngineService) only calls this once it has
+# confirmed another model will remain installed afterwards -- removing the
+# last one goes through uninstallAll instead -- but this refuses on its own
+# too, since deleting the only model would otherwise leave a live engine
+# with nothing to serve.
+uninstall_model() {
+  local model="$1"
+  if [ "$CONFIG_PATH" != "$HOME/.local/share/junie-local/server-config.json" ]; then
+    echo "ERROR: uninstall only supports the default install path." >&2
+    echo "       JUNIE_SERVER_CONFIG points at $CONFIG_PATH — unset it and" >&2
+    echo "       re-run, or remove that installation manually." >&2
+    exit 1
+  fi
+
+  models_dir="$HOME/.local/share/junie-local/models"
+  descriptor="$models_dir/$model.json"
+  if [ ! -f "$descriptor" ]; then
+    echo "ERROR: no installed model named '$model' (expected $descriptor)." >&2
+    exit 1
+  fi
+
+  other_descriptors=()
+  for d in "$models_dir"/*.json; do
+    [ -f "$d" ] || continue
+    [ "$d" = "$descriptor" ] && continue
+    other_descriptors+=("$d")
+  done
+  if [ "${#other_descriptors[@]}" -eq 0 ]; then
+    echo "ERROR: '$model' is the only installed model." >&2
+    echo "       Run './serverctl.sh uninstallAll' to remove the engine too." >&2
+    exit 1
+  fi
+
+  draft_model="$(plutil -extract draft_model raw -o - -- "$descriptor" 2>/dev/null || true)"
+  junie_model_id="$(plutil -extract id raw -o - -- "$descriptor" 2>/dev/null || true)"
+
+  # Switch the engine off $model first if it is the one currently loaded, so
+  # its weights are not deleted out from under the running worker.
+  current_model="$(plutil -extract model_name raw -o - -- "$CONFIG_PATH" 2>/dev/null || true)"
+  if [ "$current_model" = "$model" ]; then
+    fallback_model="$(basename "${other_descriptors[0]}" .json)"
+    echo "Switching off '$model' (currently serving) to '$fallback_model'..."
+    if "${CURL[@]}" -o /dev/null -m 2 "$BASE/health" >/dev/null 2>&1; then
+      "${CURL[@]}" -X POST -H 'Content-Type: application/json' \
+        -d "$(kv_to_json "model_name=$fallback_model")" \
+        -m 60 "$BASE/apply_settings" >/dev/null
+    else
+      plutil -replace model_name -string "$fallback_model" "$CONFIG_PATH" 2>/dev/null || true
+    fi
+  fi
+
+  # The drafter may be shared with a model that stays installed; only delete
+  # its weights when nothing else still needs them.
+  draft_shared=""
+  if [ -n "$draft_model" ]; then
+    for d in "${other_descriptors[@]}"; do
+      if [ "$(plutil -extract draft_model raw -o - -- "$d" 2>/dev/null || true)" = "$draft_model" ]; then
+        draft_shared=1
+        break
+      fi
+    done
+  fi
+
+  echo "Removing model '$model'..."
+  rm -rf "$models_dir/$model"
+  rm -f "$models_dir/.$model.installed"
+  if [ -n "$draft_model" ] && [ -z "$draft_shared" ]; then
+    echo "Removing its drafter '$draft_model'..."
+    rm -rf "$models_dir/$draft_model"
+    rm -f "$models_dir/.$draft_model.installed"
+  fi
+  rm -f "$descriptor"
+
+  if [ -n "$junie_model_id" ]; then
+    junie_settings="$HOME/.junie/settings.json"
+    junie_model_config="$HOME/.junie/models/$junie_model_id.json"
+    if [ -f "$junie_model_config" ]; then
+      echo "Removing Junie model config $junie_model_config"
+      rm -f "$junie_model_config"
+    fi
+    launch_model="$(plutil -extract modelForLaunch raw -o - -- "$junie_settings" 2>/dev/null || true)"
+    if [ "$launch_model" = "custom:$junie_model_id" ]; then
+      echo "Clearing default model custom:$junie_model_id in $junie_settings"
+      plutil -remove modelForLaunch "$junie_settings" 2>/dev/null || true
+    fi
+  fi
+
+  echo "Model '$model' removed; the engine and remaining models stay in place."
+}
+
 wait_ready() {
   while :; do
     phase="$("${CURL[@]}" -m 5 "$BASE/status" 2>/dev/null \
@@ -279,7 +388,11 @@ case "$cmd" in
     post /apply_settings "$1"
     ;;
   stop) post /shutdown ;;
-  uninstall) uninstall_all ;;
+  uninstall)
+    [ $# -eq 1 ] || { echo "ERROR: uninstall requires MODEL" >&2; usage; }
+    uninstall_model "$1"
+    ;;
+  uninstallAll) uninstall_all ;;
   --junie-config)
     [ $# -eq 3 ] || { echo "ERROR: --junie-config requires JUNIE_HOME and --model MODEL" >&2; usage; }
     generate_junie_config "$@"

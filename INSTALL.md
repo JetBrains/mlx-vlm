@@ -47,9 +47,12 @@ the descriptor's own `id` (`local-qwen3.6-27b-4bit`), and points
 files — start the engine separately with `./serverctl.sh start`. Restart Junie
 afterwards.
 
-`./serverctl.sh uninstall` is the reverse: it reads the ids back out of the
+`./serverctl.sh uninstallAll` is the reverse: it reads the ids back out of the
 descriptors still in `models/` and removes exactly those Junie model configs,
-clearing `modelForLaunch` when it names one of them.
+clearing `modelForLaunch` when it names one of them, then deletes the
+install directory. `./serverctl.sh uninstall MODEL` does the same for a
+single model's config and weights, leaving the engine and every other
+installed model running.
 
 ## 3. Start
 
