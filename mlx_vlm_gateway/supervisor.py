@@ -88,7 +88,10 @@ class WorkerSupervisor:
         self.settings = settings
         self.client = client
         self.process: Optional[asyncio.subprocess.Process] = None
-        self.desired_running = True
+        # Nothing runs until something asks for it: open() only starts the
+        # monitor, and the first inference request starts the worker. See
+        # open() for why booting a worker eagerly is the wrong default.
+        self.desired_running = False
         self._state = "stopped"
         self.state_since_unix = time.time()
         self.restart_count = 0
@@ -148,12 +151,23 @@ class WorkerSupervisor:
         }
 
     async def open(self) -> None:
+        """Start supervising, without starting a worker.
+
+        The daemon deliberately boots idle and lets the first inference
+        request start the worker (the same path an idle-unloaded worker
+        takes). Loading a model at boot would load whatever the config
+        names, which on a fresh install is the default model — so a
+        machine that installed some other model would crash-loop the
+        worker on a model it does not have, before any client had a
+        chance to say which model it wants. It also avoids loading a 27B
+        model at boot just to have "auto_unload_time" throw it away
+        seconds later, unused.
+        """
         if self._monitor_task is not None:
             return
         self._monitor_task = asyncio.create_task(
             self._monitor_loop(), name="mlx-vlm-worker-monitor"
         )
-        await self._ensure_process()
 
     async def close(self) -> None:
         self._closed = True

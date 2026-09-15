@@ -7,7 +7,10 @@ set -euo pipefail
 #   ./serverctl.sh start                    launch the server (background, silent);
 #                                           from a checkout, ./init_dev.sh first
 #   ./serverctl.sh status                   lifecycle phase + inference progress
-#   ./serverctl.sh wait                     poll status until phase is "ready"
+#   ./serverctl.sh wait                     poll status until phase is "ready",
+#                                           i.e. the daemon is accepting
+#                                           requests -- no model is loaded
+#                                           until the first chat request
 #   ./serverctl.sh settings                 current serving settings
 #   ./serverctl.sh apply key=value [...]    apply settings, restarting the worker
 #                                           when the setting requires it:

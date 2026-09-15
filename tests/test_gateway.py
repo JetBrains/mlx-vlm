@@ -11,6 +11,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import mlx_vlm_gateway.app as app_module
 import mlx_vlm_gateway.supervisor as supervisor_module
 from mlx_vlm_gateway.app import GatewaySettings, create_app
 from mlx_vlm_gateway.memory_monitor import MemorySample
@@ -134,6 +135,20 @@ def _wait_until(predicate, timeout=1.0):
     raise AssertionError("condition did not become true")
 
 
+def _boot_worker(client):
+    """Start the worker, the way the first inference request does.
+
+    The daemon boots idle (see WorkerSupervisor.open), so a test that
+    wants a running worker has to ask for one. This goes through the same
+    supervisor entry point the request path uses, on the app's own event
+    loop; it does not wait for readiness, so a test can still observe
+    "starting" and spawn failures.
+    """
+    client.portal.call(
+        lambda: client.app.state.supervisor.start_worker(wait_ready=False)
+    )
+
+
 def test_gateway_records_memory_for_the_current_worker(monkeypatch):
     sampled_pids = []
 
@@ -152,15 +167,26 @@ def test_gateway_records_memory_for_the_current_worker(monkeypatch):
             worker_pid=pid,
         )
 
+    # The daemon boots idle, so the first sample is taken before any worker
+    # exists; sample fast enough to reach the ones that follow the worker.
+    monkeypatch.setattr(app_module, "MEMORY_SAMPLE_INTERVAL_S", 0.01)
     app, processes = _gateway(
         monkeypatch, handler, memory_sampler=memory_sampler
     )
-    with TestClient(app):
-        _wait_until(lambda: len(app.state.memory_samples) > 0)
+    with TestClient(app) as client:
+        _boot_worker(client)
+        _wait_until(
+            lambda: any(
+                sample.worker_pid is not None
+                for sample in app.state.memory_samples.snapshot()
+            )
+        )
         sample = app.state.memory_samples.snapshot()[-1]
 
     assert sample.worker_pid == processes[0].pid
-    assert sampled_pids[0] == processes[0].pid
+    # Before the worker was started there was no pid to attribute to.
+    assert sampled_pids[0] is None
+    assert processes[0].pid in sampled_pids
 
 
 def test_worker_output_goes_to_the_configured_log(monkeypatch, tmp_path):
@@ -171,6 +197,7 @@ def test_worker_output_goes_to_the_configured_log(monkeypatch, tmp_path):
 
     app, processes = _gateway(monkeypatch, handler, worker_log_path=str(log))
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         spawned = processes[0].spawn_kwargs
 
@@ -187,10 +214,121 @@ def test_worker_inherits_our_output_when_no_log_is_configured(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         spawned = processes[0].spawn_kwargs
 
     assert "stdout" not in spawned and "stderr" not in spawned
+
+
+def test_daemon_boots_without_starting_a_worker(monkeypatch, tmp_path):
+    config_path = tmp_path / "server-config.json"
+
+    def handler(request):
+        raise AssertionError(f"worker was contacted: {request.url.path}")
+
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
+    with TestClient(app) as client:
+        # Long enough for several readiness probes, had there been a worker.
+        time.sleep(0.1)
+
+        assert processes == []
+        assert app.state.supervisor.state == "stopped"
+        assert client.get("/ready").status_code == 503
+        # Idle is not an error: the daemon is ready to take a request, it
+        # just has no model loaded yet.
+        status = client.get("/status").json()
+        assert status["phase"] == "ready"
+        assert status["phase_detail"] is None
+        assert status["model"]["loaded"] is False
+        # The config file is still created on first boot, so the worker that
+        # a later request starts reads the same file the daemon did.
+        assert json.loads(config_path.read_text())["model_name"] == (
+            DEFAULT_CONFIG["model_name"]
+        )
+
+
+def test_first_request_starts_the_worker(monkeypatch, tmp_path):
+    config_path = tmp_path / "server-config.json"
+    config_path.write_text(json.dumps({"model_name": DEFAULT_MODEL}))
+    captured = []
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": []})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
+    with TestClient(app) as client:
+        assert processes == []
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": DEFAULT_MODEL, "messages": []},
+        )
+
+        assert response.status_code == 200
+        assert captured == [
+            {"model": DEFAULT_MODEL, "messages": [], "stream": False}
+        ]
+        assert len(processes) == 1
+
+
+def test_no_worker_is_started_for_the_default_model_on_a_fresh_config(
+    monkeypatch, tmp_path
+):
+    """A fresh config names the default model, which may not be installed.
+
+    Booting a worker for it would crash-loop on missing weights on any
+    machine that installed some other model. Waiting for the first request
+    means the only worker ever started is the one for the model the client
+    actually asked for.
+    """
+    config_path = tmp_path / "server-config.json"
+    # No config file: SettingsStore writes DEFAULT_CONFIG, whose model is not
+    # one of the installed (fixture) models.
+    assert DEFAULT_CONFIG["model_name"] not in SUPPORTED_MODELS
+    captured = []
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": []})
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
+    # Record what the config named at each spawn, to pin the ordering: the
+    # requested model must be persisted before the worker reads the file.
+    spawn_models = []
+    spawn = supervisor_module.asyncio.create_subprocess_exec
+
+    async def recording_spawn(*args, **kwargs):
+        spawn_models.append(json.loads(config_path.read_text())["model_name"])
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(
+        supervisor_module.asyncio, "create_subprocess_exec", recording_spawn
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": OTHER_MODEL, "messages": []},
+        )
+
+        assert response.status_code == 200
+        assert captured == [{"model": OTHER_MODEL, "messages": [], "stream": False}]
+        # One worker, started only once the config named the asked-for model.
+        assert len(processes) == 1
+        assert spawn_models == [OTHER_MODEL]
+        persisted = json.loads(config_path.read_text())
+        assert persisted["model_name"] == OTHER_MODEL
+        assert persisted["draft_model"] == SUPPORTED_MODELS[OTHER_MODEL]
 
 
 def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
@@ -232,6 +370,7 @@ def test_gateway_forwards_batch_requests_and_controls_worker(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         assert processes[0].spawn_kwargs["env"][GATEWAY_PID_ENV] == str(os.getpid())
         assert client.post("/start_worker").status_code == 404
@@ -305,6 +444,7 @@ def test_junie_status_and_settings_endpoints(monkeypatch, tmp_path):
 
     app, _ = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
         expected_settings = {
             "model_name": "demo-model",
@@ -356,6 +496,7 @@ def test_status_reports_worker_memory_from_ready_probe(monkeypatch, tmp_path):
 
     app, _ = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
         assert client.get("/status").json()["memory"] == memory
 
@@ -379,6 +520,7 @@ def test_apply_auto_unload_time_without_restarting_worker(monkeypatch, tmp_path)
 
     app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
         app.state.supervisor.active_requests = 1
         response = client.post("/apply_settings", json={"auto_unload_time": 600})
@@ -423,6 +565,7 @@ def test_invalid_auto_unload_uses_default_and_task_keeps_running(monkeypatch, tm
 
     app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
         idle_timeout_s = DEFAULT_CONFIG["auto_unload_time"]
         assert json.loads(config_path.read_text())["auto_unload_time"] == idle_timeout_s
@@ -456,6 +599,7 @@ def test_apply_restart_setting_rejects_busy_request_without_force(
 
     app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
         app.state.supervisor.active_requests = 1
         response = client.post(
@@ -485,6 +629,7 @@ def test_config_save_failure_keeps_worker_running(monkeypatch, tmp_path):
 
     app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app, raise_server_exceptions=False) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
 
         def fail_save(_updates):
@@ -524,6 +669,7 @@ def test_applying_current_settings_is_a_noop(monkeypatch, tmp_path):
 
     app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
 
         original_process = processes[0]
@@ -609,6 +755,7 @@ def test_shutdown_stops_worker_and_gateway_accepts_v1_alias(monkeypatch):
         shutdown_callback=shutdown_called.set,
     )
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
 
         response = client.post("/v1/shutdown")
@@ -635,6 +782,7 @@ def test_second_consecutive_500_restarts_worker(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         assert client.post("/v1/chat/completions", json={}).status_code == 500
         assert len(processes) == 1
@@ -656,6 +804,7 @@ def test_worker_508_returns_503_and_restarts_worker(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         assert len(processes) == 1
 
@@ -685,6 +834,7 @@ def test_confirmed_worker_oom_returns_error_and_restarts_worker(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         assert len(processes) == 1
 
@@ -705,6 +855,7 @@ def test_worker_503_without_oom_code_does_not_restart_worker(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
 
         response = client.post("/v1/chat/completions", json={})
@@ -734,6 +885,9 @@ def test_client_disconnect_aborts_worker_request(monkeypatch):
     async def run():
         async with app.router.lifespan_context(app):
             sup = app.state.supervisor
+            # The daemon boots idle; ask for a worker as a request would.
+            await sup.start_worker(wait_ready=False)
+
             async def until_ready():
                 while sup.state != "ready":
                     await asyncio.sleep(0.01)
@@ -797,6 +951,7 @@ def test_old_worker_responses_do_not_affect_new_worker(monkeypatch):
         restart_delay_s=0.05,
     )
     with TestClient(app) as client:
+        _boot_worker(client)
         supervisor = app.state.supervisor
 
         def record_500(generation):
@@ -845,6 +1000,7 @@ def test_repeated_start_failures_stop_restart_loop(monkeypatch):
         max_start_failures=3,
     )
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "error")
         status = client.get("/status").json()
         assert status["phase_detail"] == "worker startup timeout"
@@ -885,6 +1041,7 @@ def test_process_spawn_failures_leave_gateway_available(monkeypatch):
     )
 
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "error")
 
         status = client.get("/status").json()
@@ -936,6 +1093,7 @@ def test_request_retries_worker_after_startup_cooldown(monkeypatch):
     )
 
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "error")
         assert spawn_attempts == 3
 
@@ -962,6 +1120,7 @@ def test_422_between_500_responses_resets_restart_counter(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         assert client.post("/v1/chat/completions", json={}).status_code == 500
         assert client.post("/v1/chat/completions", json={}).status_code == 422
@@ -982,6 +1141,7 @@ def test_worker_connection_failure_returns_503_and_restarts(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         response = client.post("/v1/chat/completions", json={})
         assert response.status_code == 503
@@ -1009,6 +1169,7 @@ def test_worker_connection_failure_with_fresh_oom_log_returns_oom(
         monkeypatch, handler, worker_log_path=str(log)
     )
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
 
         response = client.post("/v1/chat/completions", json={})
@@ -1033,6 +1194,7 @@ def test_worker_connection_failure_ignores_stale_oom_log(monkeypatch, tmp_path):
         monkeypatch, handler, worker_log_path=str(log)
     )
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
 
         response = client.post("/v1/chat/completions", json={})
@@ -1057,6 +1219,7 @@ def test_sigkill_under_critical_memory_pressure_returns_memory_pressure(
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         app.state.memory_samples.append(
             MemorySample(
@@ -1090,6 +1253,7 @@ def test_sigkill_without_critical_memory_pressure_returns_worker_crashed(
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         app.state.memory_samples.append(
             MemorySample(
@@ -1123,6 +1287,7 @@ def test_sigkill_with_stale_critical_memory_sample_returns_worker_crashed(
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         app.state.memory_samples.append(
             MemorySample(
@@ -1162,6 +1327,7 @@ def test_fresh_oom_log_wins_over_critical_memory_pressure(monkeypatch, tmp_path)
         monkeypatch, handler, worker_log_path=str(log)
     )
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         app.state.memory_samples.append(
             MemorySample(
@@ -1190,6 +1356,7 @@ def test_hard_timeout_returns_504_and_restarts_worker(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         response = client.post("/v1/chat/completions", json={})
         assert response.status_code == 504
@@ -1213,6 +1380,7 @@ def test_unload_interrupts_active_request_without_restart(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         result = {}
 
@@ -1246,6 +1414,7 @@ def test_unload_interrupts_request_waiting_for_worker_startup(monkeypatch):
         startup_timeout_s=1.0,
     )
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(
             lambda: client.get("/status").json()["phase"] == "loading_model"
         )
@@ -1282,6 +1451,7 @@ def test_unload_during_restart_delay_prevents_worker_respawn(monkeypatch):
         restart_delay_s=0.1,
     )
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/status").json()["phase"] == "ready")
 
         client.portal.call(app.state.supervisor.schedule_restart, "test restart")
@@ -1360,6 +1530,7 @@ def test_the_configured_api_key_reaches_the_gateway_and_the_worker(
     )
     auth = {"Authorization": "Bearer secret-token"}
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready", headers=auth).status_code == 200)
 
         assert client.get("/status", headers=auth).status_code == 200
@@ -1393,6 +1564,7 @@ def test_a_config_without_an_api_key_leaves_both_apis_open(monkeypatch):
 
     app, processes = _gateway(monkeypatch, handler)
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
 
         assert client.get("/status").status_code == 200
@@ -1412,7 +1584,8 @@ def test_worker_does_not_inherit_a_stale_api_key(monkeypatch):
         raise AssertionError(request.url.path)
 
     app, processes = _gateway(monkeypatch, handler)
-    with TestClient(app):
+    with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: bool(processes))
 
     assert "MLX_VLM_SERVER_API_KEY" not in processes[0].spawn_kwargs["env"]
@@ -1429,6 +1602,7 @@ def test_unknown_model_is_rejected_without_touching_the_worker(monkeypatch, tmp_
 
     app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
 
         response = client.post(
@@ -1464,6 +1638,7 @@ def test_request_for_other_model_reloads_idle_worker(monkeypatch, tmp_path):
 
     app, processes = _gateway(monkeypatch, handler, config_path=str(config_path))
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
 
         response = client.post(
@@ -1506,6 +1681,7 @@ def test_request_for_other_model_is_rejected_while_worker_is_busy(
         request_timeout_s=5.0,
     )
     with TestClient(app) as client:
+        _boot_worker(client)
         _wait_until(lambda: client.get("/ready").status_code == 200)
         result = {}
 

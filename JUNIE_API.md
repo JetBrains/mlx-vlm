@@ -4,6 +4,9 @@ The public server is the lightweight gateway at `http://localhost:19239` by
 default. Its `host` and `port` come from `server-config.json`.
 The gateway spawns the inference worker on the same `host` at `worker_port`
 (`19240` by default) and may restart or stop it without going down itself.
+It starts no worker of its own accord: a freshly started gateway holds no
+model until the first inference request, exactly like one whose worker was
+auto-unloaded.
 The worker also watches its parent process and exits if the gateway crashes,
 so an orphan cannot keep model memory or port `19240` occupied.
 
@@ -20,9 +23,12 @@ Use `./serverctl.sh` for lifecycle and settings commands. Except for
 ## Inference
 
 `POST /v1/chat/completions` accepts an OpenAI chat-completions JSON body.
-The gateway always forwards it as a non-streaming request. If the worker was
-stopped by the idle timeout, the gateway starts it, waits until it is ready,
-and then forwards the same request.
+The gateway always forwards it as a non-streaming request. Whenever no
+worker is running — the gateway has just started, or the idle timeout
+stopped the previous one — the gateway starts one, waits until it is ready,
+and then forwards the same request. The model is chosen from the request
+itself (below) before that worker starts, so a config still naming the
+factory-default model never loads it.
 
 The request's `model` field selects between the installed models
 (`Qwen3.6-27B-MLX-4bit` and `Qwen3.8-27B-MLX-4bit`); omitting it uses
@@ -77,9 +83,10 @@ restarts the worker process, so a retry lands on a freshly loaded model.
 
 Phases are `loading_model`, `ready`, `restarting`, `stopping`, and `error`.
 After three consecutive startup failures, the gateway enters `error` instead
-of restarting forever; settings can still be changed to retry startup. An
-auto-unloaded worker is represented as `phase: "ready"` with
-`model.loaded: false`, because the gateway is ready to start it on demand.
+of restarting forever; settings can still be changed to retry startup. A worker that
+is not running — auto-unloaded, or never started since the gateway came up —
+is represented as `phase: "ready"` with `model.loaded: false`, because the
+gateway is ready to start it on demand.
 
 - `memory.total_gb` — the worker process's physical footprint (same number
   Activity Monitor shows), including the model weights and all caches.
