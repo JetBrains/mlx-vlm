@@ -126,7 +126,13 @@ among others:
 - `int8 × int8 → int32`, `uint8 × uint8 → int32`
 - mixed `half/bfloat/float × int8`
 - **4-bit operand formats**: `half/bfloat × int4b_format`, `int8 × int4b → int32`
-- No fp8, no fp4 float formats in the matmul2d combination table.
+- ~~No fp8, no fp4 float formats~~ **Update 2026-09-21 (macOS 27.2 / Metal 4.1):**
+  the SDK now also exposes int2b/uint2b, fp8 (e4m3/e5m2), and fp4 (e2m1) operands.
+  **All 70 supported combinations measured in [`MMA_RATES.md`](MMA_RATES.md)** —
+  summary: int8×int8 117.8 TOPS is the unique full-rate path; int8×int4b/int2b =
+  0.85/0.88 of it; every float-involving combo (incl. fp8) = ~0.5 (the fp16
+  datapath); fp4×fp4 = ~0.42; strict fp32 = 0.12. fp8/fp4 are storage formats,
+  not speed formats, on M5.
 
 ### 5.2 What the NAX hardware accelerates (external research)
 
@@ -348,6 +354,7 @@ Net vs the ttl cache: ~5% prefill throughput for −17 GB peak memory.
 | `qbench4.py` | qmm vs per-call dequant+GEMM at the model's three projection shapes |
 | `e2e_dequant.py` | end-to-end prefill tok/s on the real model, with/without the dequant-prefill patch |
 | `mma_rate.py` | raw NAX MMA rates (fp16/bf16/int8) via custom MPP tensor-ops kernel — **the 2x proof** |
+| `mma_rate_all.py` | rate sweep of **all 70 matmul2d type combinations** (incl. int4b/int2b/fp8/fp4); results in `MMA_RATES.md` + `mma_rate_all.json` |
 | `tensorops_compile_test.py` | minimal check that `mx.fast.metal_kernel` compiles MPP headers |
 | `int8_gemm_v1.py` | first working W8A8 GEMM (64×32 tiles), exact-int32 correctness harness |
 | `int8_gemm_sweep.py` | tile/simdgroup/K-loop sweep that found the 128×128×8simd config |

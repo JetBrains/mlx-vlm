@@ -1,0 +1,1038 @@
+[
+ {
+  "a": "half",
+  "b": "half",
+  "c": "half",
+  "strict": false,
+  "best_tops": 63.4,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 62.9,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 63.4,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 63.1,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 63.4,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "half",
+  "b": "int8_t",
+  "c": "half",
+  "strict": false,
+  "best_tops": 60.7,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 47.3,
+   "tg_32x32x32": 59.1,
+   "tg_32x32x64": 60.4,
+   "tg_64x32x32": 60.7
+  }
+ },
+ {
+  "a": "half",
+  "b": "uint8_t",
+  "c": "half",
+  "strict": false,
+  "best_tops": 60.9,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 50.8,
+   "tg_32x32x32": 60.4,
+   "tg_32x32x64": 60.7,
+   "tg_64x32x32": 60.9
+  }
+ },
+ {
+  "a": "int8_t",
+  "b": "half",
+  "c": "half",
+  "strict": false,
+  "best_tops": 60.8,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 58.2,
+   "tg_32x32x32": 60.6,
+   "tg_32x32x64": 60.8,
+   "tg_64x32x32": 59.7
+  }
+ },
+ {
+  "a": "uint8_t",
+  "b": "half",
+  "c": "half",
+  "strict": false,
+  "best_tops": 59.8,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 59.4,
+   "tg_32x32x32": 59.5,
+   "tg_32x32x64": 59.8,
+   "tg_64x32x32": 58.4
+  }
+ },
+ {
+  "a": "half",
+  "b": "half",
+  "c": "float",
+  "strict": false,
+  "best_tops": 60.3,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 59.8,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 60.3,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 59.7,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 59.7,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "half",
+  "b": "float",
+  "c": "float",
+  "strict": false,
+  "best_tops": 60.3,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 53.2,
+   "tg_32x32x32": 60.3,
+   "tg_32x32x64": 59.7,
+   "tg_64x32x32": 59.3
+  }
+ },
+ {
+  "a": "half",
+  "b": "int8_t",
+  "c": "float",
+  "strict": false,
+  "best_tops": 58.5,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 50.8,
+   "tg_32x32x32": 56.4,
+   "tg_32x32x64": 57.0,
+   "tg_64x32x32": 58.5
+  }
+ },
+ {
+  "a": "half",
+  "b": "uint8_t",
+  "c": "float",
+  "strict": false,
+  "best_tops": 59.7,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 51.4,
+   "tg_32x32x32": 58.5,
+   "tg_32x32x64": 59.7,
+   "tg_64x32x32": 58.3
+  }
+ },
+ {
+  "a": "float",
+  "b": "half",
+  "c": "float",
+  "strict": false,
+  "best_tops": 60.1,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 57.0,
+   "tg_32x32x32": 59.7,
+   "tg_32x32x64": 60.1,
+   "tg_64x32x32": 58.9
+  }
+ },
+ {
+  "a": "float",
+  "b": "float",
+  "c": "float",
+  "strict": false,
+  "best_tops": 59.6,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 48.8,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 59.6,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 59.2,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 47.9,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "float",
+  "b": "float",
+  "c": "float",
+  "strict": true,
+  "best_tops": 14.6,
+  "best_cfg": "tg_16x32x32",
+  "configs": {
+   "tg_16x32x32": 14.6,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 14.2,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 14.0,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 14.2,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "float",
+  "b": "int8_t",
+  "c": "float",
+  "strict": false,
+  "best_tops": 58.7,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 48.5,
+   "tg_32x32x32": 57.6,
+   "tg_32x32x64": 58.7,
+   "tg_64x32x32": 54.0
+  }
+ },
+ {
+  "a": "float",
+  "b": "uint8_t",
+  "c": "float",
+  "strict": false,
+  "best_tops": 57.5,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 47.5,
+   "tg_32x32x32": 55.7,
+   "tg_32x32x64": 57.5,
+   "tg_64x32x32": 53.2
+  }
+ },
+ {
+  "a": "int8_t",
+  "b": "half",
+  "c": "float",
+  "strict": false,
+  "best_tops": 59.1,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 55.4,
+   "tg_32x32x32": 57.4,
+   "tg_32x32x64": 59.1,
+   "tg_64x32x32": 54.2
+  }
+ },
+ {
+  "a": "uint8_t",
+  "b": "half",
+  "c": "float",
+  "strict": false,
+  "best_tops": 60.0,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 55.6,
+   "tg_32x32x32": 58.2,
+   "tg_32x32x64": 60.0,
+   "tg_64x32x32": 55.4
+  }
+ },
+ {
+  "a": "int8_t",
+  "b": "float",
+  "c": "float",
+  "strict": false,
+  "best_tops": 58.4,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 51.0,
+   "tg_32x32x32": 56.3,
+   "tg_32x32x64": 58.4,
+   "tg_64x32x32": 52.9
+  }
+ },
+ {
+  "a": "uint8_t",
+  "b": "float",
+  "c": "float",
+  "strict": false,
+  "best_tops": 59.8,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 52.3,
+   "tg_32x32x32": 56.7,
+   "tg_32x32x64": 59.8,
+   "tg_64x32x32": 54.8
+  }
+ },
+ {
+  "a": "int8_t",
+  "b": "int8_t",
+  "c": "int32_t",
+  "strict": false,
+  "best_tops": 117.8,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 95.7,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 105.2,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 117.8,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 107.7,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "uint8_t",
+  "b": "uint8_t",
+  "c": "int32_t",
+  "strict": false,
+  "best_tops": 117.5,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 96.1,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 106.4,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 117.5,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 107.7,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "bfloat",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 61.6,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 59.9,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 61.6,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 61.5,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 60.8,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "bfloat",
+  "c": "float",
+  "strict": false,
+  "best_tops": 61.4,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 61.2,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 60.5,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 61.4,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 61.2,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "float",
+  "c": "float",
+  "strict": false,
+  "best_tops": 61.7,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 54.4,
+   "tg_32x32x32": 61.7,
+   "tg_32x32x64": 61.6,
+   "tg_64x32x32": 60.5
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "int8_t",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 59.3,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 45.7,
+   "tg_32x32x32": 56.1,
+   "tg_32x32x64": 59.3,
+   "tg_64x32x32": 58.1
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "int8_t",
+  "c": "float",
+  "strict": false,
+  "best_tops": 60.5,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 52.2,
+   "tg_32x32x32": 60.5,
+   "tg_32x32x64": 57.0,
+   "tg_64x32x32": 54.6
+  }
+ },
+ {
+  "a": "float",
+  "b": "bfloat",
+  "c": "float",
+  "strict": false,
+  "best_tops": 59.8,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 58.7,
+   "tg_32x32x32": 59.8,
+   "tg_32x32x64": 59.2,
+   "tg_64x32x32": 56.7
+  }
+ },
+ {
+  "a": "int8_t",
+  "b": "bfloat",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 55.7,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 54.4,
+   "tg_32x32x32": 55.7,
+   "tg_32x32x64": 55.5,
+   "tg_64x32x32": 50.1
+  }
+ },
+ {
+  "a": "int8_t",
+  "b": "bfloat",
+  "c": "float",
+  "strict": false,
+  "best_tops": 57.6,
+  "best_cfg": "tg_16x32x32",
+  "configs": {
+   "tg_16x32x32": 57.6,
+   "tg_32x32x32": 55.4,
+   "tg_32x32x64": 57.6,
+   "tg_64x32x32": 52.5
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "half",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 62.3,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 61.9,
+   "tg_32x32x32": 58.7,
+   "tg_32x32x64": 62.3,
+   "tg_64x32x32": 60.3
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "half",
+  "c": "half",
+  "strict": false,
+  "best_tops": 63.2,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 62.6,
+   "tg_32x32x32": 62.3,
+   "tg_32x32x64": 63.2,
+   "tg_64x32x32": 61.1
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "half",
+  "c": "float",
+  "strict": false,
+  "best_tops": 63.3,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 62.9,
+   "tg_32x32x32": 62.7,
+   "tg_32x32x64": 63.3,
+   "tg_64x32x32": 57.5
+  }
+ },
+ {
+  "a": "half",
+  "b": "bfloat",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 61.8,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 59.4,
+   "tg_32x32x32": 58.9,
+   "tg_32x32x64": 61.8,
+   "tg_64x32x32": 59.1
+  }
+ },
+ {
+  "a": "half",
+  "b": "bfloat",
+  "c": "half",
+  "strict": false,
+  "best_tops": 60.3,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 60.3,
+   "tg_32x32x32": 60.1,
+   "tg_32x32x64": 60.3,
+   "tg_64x32x32": 60.0
+  }
+ },
+ {
+  "a": "half",
+  "b": "bfloat",
+  "c": "float",
+  "strict": false,
+  "best_tops": 62.3,
+  "best_cfg": "tg_16x32x32",
+  "configs": {
+   "tg_16x32x32": 62.3,
+   "tg_32x32x32": 60.5,
+   "tg_32x32x64": 61.1,
+   "tg_64x32x32": 59.9
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "uint8_t",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 57.7,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 45.8,
+   "tg_32x32x32": 55.5,
+   "tg_32x32x64": 57.7,
+   "tg_64x32x32": 54.4
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "uint8_t",
+  "c": "float",
+  "strict": false,
+  "best_tops": 59.9,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 51.7,
+   "tg_32x32x32": 59.9,
+   "tg_32x32x64": 59.3,
+   "tg_64x32x32": 58.6
+  }
+ },
+ {
+  "a": "uint8_t",
+  "b": "bfloat",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 58.3,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 56.9,
+   "tg_32x32x32": 57.2,
+   "tg_32x32x64": 58.3,
+   "tg_64x32x32": 50.4
+  }
+ },
+ {
+  "a": "uint8_t",
+  "b": "bfloat",
+  "c": "float",
+  "strict": false,
+  "best_tops": 59.5,
+  "best_cfg": "tg_16x32x32",
+  "configs": {
+   "tg_16x32x32": 59.5,
+   "tg_32x32x32": 59.5,
+   "tg_32x32x64": 58.9,
+   "tg_64x32x32": 55.0
+  }
+ },
+ {
+  "a": "half",
+  "b": "int4b_format",
+  "c": "half",
+  "strict": false,
+  "best_tops": 58.3,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 48.9,
+   "tg_32x32x32": 57.2,
+   "tg_32x32x64": 57.9,
+   "tg_64x32x32": 58.3
+  }
+ },
+ {
+  "a": "half",
+  "b": "int4b_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 58.3,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 50.2,
+   "tg_32x32x32": 58.3,
+   "tg_32x32x64": 58.1,
+   "tg_64x32x32": 58.1
+  }
+ },
+ {
+  "a": "half",
+  "b": "uint4b_format",
+  "c": "half",
+  "strict": false,
+  "best_tops": 59.9,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 50.5,
+   "tg_32x32x32": 59.9,
+   "tg_32x32x64": 59.6,
+   "tg_64x32x32": 57.2
+  }
+ },
+ {
+  "a": "half",
+  "b": "uint4b_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 60.2,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 52.7,
+   "tg_32x32x32": 59.3,
+   "tg_32x32x64": 60.2,
+   "tg_64x32x32": 59.2
+  }
+ },
+ {
+  "a": "int8_t",
+  "b": "int4b_format",
+  "c": "int32_t",
+  "strict": false,
+  "best_tops": 99.9,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 65.7,
+   "tg_32x32x32": 89.5,
+   "tg_32x32x64": 98.0,
+   "tg_64x32x32": 99.9
+  }
+ },
+ {
+  "a": "uint8_t",
+  "b": "uint4b_format",
+  "c": "int32_t",
+  "strict": false,
+  "best_tops": 96.1,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 62.6,
+   "tg_32x32x32": 85.9,
+   "tg_32x32x64": 96.1,
+   "tg_64x32x32": 95.3
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "int4b_format",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 59.2,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 47.6,
+   "tg_32x32x32": 52.8,
+   "tg_32x32x64": 58.1,
+   "tg_64x32x32": 59.2
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "uint4b_format",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 61.9,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 49.3,
+   "tg_32x32x32": 60.2,
+   "tg_32x32x64": 61.9,
+   "tg_64x32x32": 58.0
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "int4b_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 62.4,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 53.5,
+   "tg_32x32x32": 62.4,
+   "tg_32x32x64": 60.3,
+   "tg_64x32x32": 59.6
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "uint4b_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 63.2,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 54.6,
+   "tg_32x32x32": 63.1,
+   "tg_32x32x64": 63.2,
+   "tg_64x32x32": 59.7
+  }
+ },
+ {
+  "a": "int8_t",
+  "b": "int2b_format",
+  "c": "int32_t",
+  "strict": false,
+  "best_tops": 103.1,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 67.6,
+   "tg_32x32x32": 86.6,
+   "tg_32x32x64": 100.4,
+   "tg_64x32x32": 103.1
+  }
+ },
+ {
+  "a": "uint8_t",
+  "b": "uint2b_format",
+  "c": "int32_t",
+  "strict": false,
+  "best_tops": 100.9,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 70.6,
+   "tg_32x32x32": 91.8,
+   "tg_32x32x64": 100.9,
+   "tg_64x32x32": 99.4
+  }
+ },
+ {
+  "a": "half",
+  "b": "int2b_format",
+  "c": "half",
+  "strict": false,
+  "best_tops": 63.4,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 51.2,
+   "tg_32x32x32": 62.5,
+   "tg_32x32x64": 61.0,
+   "tg_64x32x32": 63.4
+  }
+ },
+ {
+  "a": "half",
+  "b": "int2b_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 61.9,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 51.0,
+   "tg_32x32x32": 60.6,
+   "tg_32x32x64": 61.9,
+   "tg_64x32x32": 61.9
+  }
+ },
+ {
+  "a": "half",
+  "b": "uint2b_format",
+  "c": "half",
+  "strict": false,
+  "best_tops": 63.2,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 54.8,
+   "tg_32x32x32": 62.9,
+   "tg_32x32x64": 63.2,
+   "tg_64x32x32": 62.5
+  }
+ },
+ {
+  "a": "half",
+  "b": "uint2b_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 63.4,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 54.8,
+   "tg_32x32x32": 61.6,
+   "tg_32x32x64": 63.4,
+   "tg_64x32x32": 60.3
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "int2b_format",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 58.9,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 45.0,
+   "tg_32x32x32": 54.9,
+   "tg_32x32x64": 58.8,
+   "tg_64x32x32": 58.9
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "uint2b_format",
+  "c": "bfloat",
+  "strict": false,
+  "best_tops": 61.9,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 49.4,
+   "tg_32x32x32": 59.9,
+   "tg_32x32x64": 61.9,
+   "tg_64x32x32": 58.9
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "int2b_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 61.9,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 52.8,
+   "tg_32x32x32": 60.9,
+   "tg_32x32x64": 61.9,
+   "tg_64x32x32": 61.8
+  }
+ },
+ {
+  "a": "bfloat",
+  "b": "uint2b_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 63.6,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 54.6,
+   "tg_32x32x32": 61.8,
+   "tg_32x32x64": 63.6,
+   "tg_64x32x32": 62.5
+  }
+ },
+ {
+  "a": "half",
+  "b": "metal_fp4_e2m1_format",
+  "c": "half",
+  "strict": false,
+  "best_tops": 61.9,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 45.8,
+   "tg_32x32x32": 57.6,
+   "tg_32x32x64": 60.1,
+   "tg_64x32x32": 61.9
+  }
+ },
+ {
+  "a": "half",
+  "b": "metal_fp4_e2m1_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 61.4,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 47.1,
+   "tg_32x32x32": 58.5,
+   "tg_32x32x64": 59.9,
+   "tg_64x32x32": 61.4
+  }
+ },
+ {
+  "a": "half",
+  "b": "metal_fp8_e4m3_format",
+  "c": "half",
+  "strict": false,
+  "best_tops": 64.0,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 61.2,
+   "tg_32x32x32": 63.5,
+   "tg_32x32x64": 64.0,
+   "tg_64x32x32": 63.7
+  }
+ },
+ {
+  "a": "half",
+  "b": "metal_fp8_e4m3_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 64.3,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 60.0,
+   "tg_32x32x32": 63.1,
+   "tg_32x32x64": 64.3,
+   "tg_64x32x32": 63.8
+  }
+ },
+ {
+  "a": "half",
+  "b": "metal_fp8_e5m2_format",
+  "c": "half",
+  "strict": false,
+  "best_tops": 63.7,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 61.0,
+   "tg_32x32x32": 61.9,
+   "tg_32x32x64": 62.5,
+   "tg_64x32x32": 63.7
+  }
+ },
+ {
+  "a": "half",
+  "b": "metal_fp8_e5m2_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 64.3,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 59.9,
+   "tg_32x32x32": 62.5,
+   "tg_32x32x64": 64.3,
+   "tg_64x32x32": 63.7
+  }
+ },
+ {
+  "a": "metal_fp4_e2m1_format",
+  "b": "metal_fp4_e2m1_format",
+  "c": "half",
+  "strict": false,
+  "best_tops": 52.0,
+  "best_cfg": "tg_64x32x32",
+  "configs": {
+   "tg_16x32x32": 37.0,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 48.8,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 50.1,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 52.0,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "metal_fp4_e2m1_format",
+  "b": "metal_fp4_e2m1_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 48.5,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 37.0,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 48.5,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 47.0,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 46.4,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "metal_fp8_e4m3_format",
+  "b": "metal_fp8_e4m3_format",
+  "c": "half",
+  "strict": false,
+  "best_tops": 64.6,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 57.3,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 64.6,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 59.9,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 63.8,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "metal_fp8_e4m3_format",
+  "b": "metal_fp8_e4m3_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 64.3,
+  "best_cfg": "tg_32x32x64",
+  "configs": {
+   "tg_16x32x32": 58.7,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 63.4,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 64.3,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 63.8,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "metal_fp8_e5m2_format",
+  "b": "metal_fp8_e5m2_format",
+  "c": "half",
+  "strict": false,
+  "best_tops": 64.2,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 61.9,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 64.2,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 64.0,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 63.9,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ },
+ {
+  "a": "metal_fp8_e5m2_format",
+  "b": "metal_fp8_e5m2_format",
+  "c": "float",
+  "strict": false,
+  "best_tops": 63.1,
+  "best_cfg": "tg_32x32x32",
+  "configs": {
+   "tg_16x32x32": 58.7,
+   "coop_16x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x32": 63.1,
+   "coop_32x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_32x32x64": 61.7,
+   "coop_32x32x64": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'",
+   "tg_64x32x32": 60.0,
+   "coop_64x32x32": "FAIL: ackend/metal/kernels/utils.h:515:26: error: no matching member function for call to 'get_destination_cooperative_tensor'"
+  }
+ }
+]
