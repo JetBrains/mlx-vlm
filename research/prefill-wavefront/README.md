@@ -24,6 +24,24 @@ reachable from MLX today. Without kernel-level concurrency, no schedule of
 chunks/layers can overlap anything, regardless of how legal the data
 dependencies are.
 
+**Upstream status (checked 2026-09-21).** What MLX shipped in 2026 is
+*thread safety*, not GPU concurrency: mlx#3078 ("concurrent inference of
+independent models") was closed 2026-04-24 with "MLX has thread safety
+support in 0.31.2 now" — streams became thread-local and eval is safe from
+multiple threads. We tested that exact pattern too (two threads, each with
+its own stream created in-thread, mlx 0.32.2): 37.2 ms vs 38.0 ms
+sequential — still zero GPU overlap, same for mx.async_eval on two streams
+(37.2 ms). Maintainer expectation disagrees with measurement: awni wrote
+(Jan 2026, #3078) that the two-stream pattern "will in theory run both
+models in parallel up to the capacity of the GPU", and the docs describe a
+Metal stream as its own command queue. Discussion #1956 explains the likely
+serializer: MLX allocates buffers untracked
+(ResourceHazardTrackingModeUntracked) and orders encoders with explicit
+Fences. No open PR/WIP for cross-stream kernel concurrency was found; the
+vllm-metal RFC #188 documents the same pain from the other direction.
+Given the docs/maintainer claim vs observed behavior, `overlap.py` is a
+ready-made repro for an upstream issue.
+
 **What would change this:**
 - MLX gaining truly concurrent GPU streams (or concurrent dispatch within
   a command buffer). Re-run `overlap.py` after MLX upgrades; if test 2
