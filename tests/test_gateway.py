@@ -1711,3 +1711,55 @@ def test_request_for_other_model_is_rejected_while_worker_is_busy(
         # No reload happened and the configured model was left alone.
         assert len(processes) == 1
         assert json.loads(config_path.read_text())["model_name"] == DEFAULT_MODEL
+
+
+def test_splash_gateway_identity_and_settings(monkeypatch, tmp_path):
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "manifest.json").write_text(json.dumps({"model": "local/blend-v03"}))
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {
+                **DEFAULT_CONFIG,
+                "worker_backend": "splash",
+                "splash_package": str(package),
+                "model_name": "junie-blend",
+                "kv_quantization": True,
+            }
+        )
+    )
+    received = []
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/chat/completions":
+            received.append(json.loads(request.content))
+            return httpx.Response(200, json={"model": "local/blend-v03", "choices": []})
+        if request.url.path == "/status":
+            return httpx.Response(200, json={"memory_actual": {"current_bytes": 123}})
+        return httpx.Response(404)
+
+    app, _ = _gateway(monkeypatch, handler, config_path=str(config))
+    with TestClient(app) as client:
+        assert client.get("/v1/models").json()["data"][0]["id"] == "junie-blend"
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "junie-blend", "messages": [], "reasoning_effort": "low"},
+        )
+        assert response.status_code == 200
+        assert received[0]["model"] == "local/blend-v03"
+        assert received[0]["reasoning_effort"] == "low"
+        assert response.json()["model"] == "local/blend-v03"
+        status = client.get("/status").json()
+        assert status["model"]["id"] == "junie-blend"
+        assert status["backend"]["status"]["memory_actual"]["current_bytes"] == 123
+        assert (
+            client.post("/apply_settings", json={"kv_quantization": False}).status_code
+            == 400
+        )
+        assert (
+            client.post("/v1/chat/completions", json={"model": "other"}).status_code
+            == 404
+        )

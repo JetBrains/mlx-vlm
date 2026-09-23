@@ -213,3 +213,9 @@ request finishes or `force=true` is passed.
 Only `start` knows how the server is launched; every other command is plain
 HTTP against the port in `server-config.json`, so the script drives a
 checkout and an unpacked tarball alike.
+
+## Experimental Splash backend
+
+An opt-in offline Splash worker can run behind this same gateway. See
+[configuration and limitations](docs/junie-splash-worker.md). MLX remains the
+default; this does not change the published installer.

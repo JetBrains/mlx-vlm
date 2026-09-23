@@ -25,7 +25,6 @@ from mlx_vlm_shared.server_settings import (
     CONFIG_PATH_ENV,
     DEFAULT_CONFIG_PATH,
     config_path,
-    discover_supported_models,
     load_config,
 )
 
@@ -47,7 +46,6 @@ from .supervisor import (
     auth_headers,
     worker_command,
 )
-
 
 logger = logging.getLogger("mlx_vlm.gateway")
 
@@ -93,10 +91,7 @@ def _is_confirmed_out_of_memory(response: httpx.Response) -> bool:
     except ValueError:
         return False
     error = payload.get("error") if isinstance(payload, dict) else None
-    return (
-        isinstance(error, dict)
-        and error.get("code") == OUT_OF_MEMORY_ERROR_CODE
-    )
+    return isinstance(error, dict) and error.get("code") == OUT_OF_MEMORY_ERROR_CODE
 
 
 def _server_error_response(code: str, message: str) -> JSONResponse:
@@ -281,6 +276,22 @@ def create_app(
     async def status(request: Request):
         payload = _status_payload_base(request)
         sup = supervisor(request)
+        if settings_store(request).is_splash():
+            payload["backend"] = {"name": "splash"}
+            if sup.state == "ready":
+                try:
+                    response = await request.app.state.client.get(
+                        f"{settings.worker_url}/status",
+                        timeout=settings.probe_timeout_s,
+                        headers=worker_auth,
+                    )
+                    if response.status_code == 200:
+                        # Keep native allocation metrics under their real names;
+                        # they are not the MLX process-footprint/cache metrics.
+                        payload["backend"]["status"] = response.json()
+                except (httpx.RequestError, ValueError):
+                    pass
+            return payload
         if sup.active_requests > 0 and sup.state == "ready":
             try:
                 response = await request.app.state.client.get(
@@ -443,6 +454,18 @@ def create_app(
     @app.get("/models")
     @app.get("/v1/models", include_in_schema=False)
     async def models(request: Request):
+        store = settings_store(request)
+        if store.is_splash():
+            return {
+                "object": "list",
+                "data": [
+                    {
+                        "id": store.current()["model_name"],
+                        "object": "model",
+                        "created": 0,
+                    }
+                ],
+            }
         if supervisor(request).state == "ready":
             response = await management_proxy(request, "GET", "/v1/models")
             if response.status_code == 200:
@@ -556,7 +579,7 @@ def create_app(
         # An absent model field means "whatever is configured".
         requested_model = payload.get("model")
         store = settings_store(request)
-        supported_models = discover_supported_models(store.models_dir())
+        supported_models = store.supported_models()
         if (
             requested_model
             and requested_model not in supported_models
@@ -575,6 +598,7 @@ def create_app(
                     }
                 },
             )
+        payload = store.inference_payload(payload)
         payload["stream"] = False
         headers = {"content-type": "application/json", **worker_auth}
         for name in ("x-apc-tenant", "x-tenant-id"):
@@ -671,9 +695,7 @@ def create_app(
                 except (asyncio.CancelledError, httpx.HTTPError):
                     pass
                 sup.requests_cancelled += 1
-                logger.info(
-                    "Client disconnected; aborted in-flight worker request."
-                )
+                logger.info("Client disconnected; aborted in-flight worker request.")
                 # 499: client closed request; nobody reads this.
                 return Response(status_code=499)
             response = post_task.result()
@@ -689,9 +711,7 @@ def create_app(
         except httpx.RequestError as exc:
             sup.requests_failed += 1
             worker_pid = None if worker_process is None else worker_process.pid
-            returncode = (
-                None if worker_process is None else worker_process.returncode
-            )
+            returncode = None if worker_process is None else worker_process.returncode
             if worker_process is not None and returncode is None:
                 try:
                     returncode = await asyncio.wait_for(
@@ -824,7 +844,14 @@ def build_settings(path: str, config: dict) -> GatewaySettings:
             f"ERROR: public port {config['port']} and worker port "
             f"{config['worker_port']} must differ; fix {path}."
         )
-    worker_host = worker_connect_host(config["host"])
+    from mlx_vlm_gateway.splash import validate_config
+
+    validate_config(config)
+    worker_host = (
+        "127.0.0.1"
+        if config.get("worker_backend") == "splash"
+        else worker_connect_host(config["host"])
+    )
     return GatewaySettings(
         worker_url=f"http://{worker_host}:{config['worker_port']}",
         worker_command=worker_command(),

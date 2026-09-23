@@ -87,6 +87,14 @@ def run_worker(argv: list[str]) -> None:
     # server, so hand it a clean one without the subcommand.
     sys.argv = [sys.argv[0], *argv]
 
+    from mlx_vlm_shared.server_settings import load_config
+
+    if load_config().get("worker_backend", "mlx") == "splash":
+        from mlx_vlm_gateway.splash import main as splash_main
+
+        splash_main()
+        return
+
     from mlx_vlm.server.junie.launch import main as worker_main
 
     worker_main()

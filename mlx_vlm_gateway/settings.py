@@ -15,7 +15,6 @@ from mlx_vlm_shared.server_settings import (
     normalize_config,
 )
 
-
 logger = logging.getLogger("mlx_vlm.gateway")
 
 __all__ = [
@@ -97,6 +96,26 @@ class SettingsStore:
     def draft_model(self) -> Optional[str]:
         return self._config.get("draft_model", DEFAULT_DRAFT_MODEL)
 
+    def is_splash(self) -> bool:
+        return self._config.get("worker_backend", "mlx") == "splash"
+
+    def inference_payload(self, payload: dict) -> dict:
+        if not self.is_splash():
+            return payload
+        from mlx_vlm_gateway.splash import package_model
+
+        return {**payload, "model": package_model(self._config)}
+
+    def supported_models(self) -> dict:
+        if self.is_splash():
+            return {
+                self._config["model_name"]: {
+                    "draft_model": self.draft_model(),
+                    "draft_kind": "dflash",
+                }
+            }
+        return discover_supported_models(self.models_dir())
+
     def models_dir(self) -> str:
         return self._config.get("models_dir", DEFAULT_CONFIG["models_dir"])
 
@@ -121,11 +140,10 @@ class SettingsStore:
                     '"model_name" must be a non-empty string.'
                 )
             updates["model_name"] = value.strip()
-            supported = discover_supported_models(self.models_dir())
+            supported = self.supported_models()
             if updates["model_name"] not in supported:
                 raise SettingsValidationError(
-                    "Unsupported model. Available models: "
-                    f"{', '.join(supported)}"
+                    "Unsupported model. Available models: " f"{', '.join(supported)}"
                 )
 
         for key in ("max_context_length", "auto_unload_time"):
@@ -138,6 +156,8 @@ class SettingsStore:
             "kv_quantization", updates["kv_quantization"]
         ):
             raise SettingsValidationError('"kv_quantization" must be a boolean.')
+        if self.is_splash() and updates.get("kv_quantization") is False:
+            raise SettingsValidationError("This Splash runtime supports INT8 KV only.")
         return updates, force
 
     def save(self, updates: dict) -> dict:
@@ -145,9 +165,7 @@ class SettingsStore:
         # kind; switching model without them would feed the verify pass a
         # mismatched MTP head, or run the wrong speculative-decode path
         # against the new drafter.
-        supported = discover_supported_models(self.models_dir()).get(
-            updates.get("model_name")
-        )
+        supported = self.supported_models().get(updates.get("model_name"))
         if supported is not None:
             updates = dict(updates)
             updates.setdefault("draft_model", supported["draft_model"])

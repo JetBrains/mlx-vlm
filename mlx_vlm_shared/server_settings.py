@@ -11,7 +11,6 @@ import logging
 import os
 from typing import Optional
 
-
 logger = logging.getLogger("mlx_vlm.config")
 
 CONFIG_PATH_ENV = "JUNIE_SERVER_CONFIG"
@@ -30,6 +29,7 @@ RESTART_SETTING_KEYS = {
 }
 
 DEFAULT_CONFIG = {
+    "worker_backend": "mlx",
     "model_name": "Qwen3.6-27B-MLX-4bit",
     # Multi-token-prediction speculative-decoding drafter for the model
     # above. It has no standalone language_model head, so it is only ever
@@ -189,6 +189,7 @@ def _is_positive_int(value) -> bool:
 
 
 _VALIDATORS = {
+    "worker_backend": lambda value: value in ("mlx", "splash"),
     "model_name": lambda value: (
         value is None or (isinstance(value, str) and bool(value.strip()))
     ),
