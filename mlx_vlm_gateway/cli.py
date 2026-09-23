@@ -137,6 +137,7 @@ def write_json(path: str, payload) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp_path = f"{path}.tmp"
     with open(temp_path, "w", encoding="utf-8") as stream:
+        os.chmod(temp_path, 0o600)
         json.dump(payload, stream, indent=JUNIE_JSON_INDENT)
         stream.write("\n")
     os.replace(temp_path, path)
@@ -200,6 +201,36 @@ def run_junie_config(argv: list[str]) -> None:
     # Read server config to resolve template variables. load_config merges the
     # defaults, so every key it is asked for is present.
     server_cfg = load_config(server_config_path)
+    backend = model_cfg.get("worker_backend", "mlx")
+    if backend == "splash":
+        from mlx_vlm_gateway.splash import validate_config
+
+        # Descriptor-selected package lives inside the managed models directory.
+        # Do not accept absolute paths or traversals from downloaded metadata.
+        package_name = model_cfg.get("splash_package")
+        if (
+            not isinstance(package_name, str)
+            or not package_name
+            or package_name in (".", "..")
+            or os.path.basename(package_name) != package_name
+        ):
+            parser.error("Invalid Splash package name in model descriptor")
+        server_cfg.update(
+            worker_backend="splash",
+            splash_package=os.path.join(models_dir, package_name),
+            model_name=args.model,
+            models_dir=models_dir,
+            draft_model=model_cfg.get("draft_model"),
+            kv_quantization=True,
+        )
+        validate_config(server_cfg)
+        write_json(server_config_path, server_cfg)
+    elif backend != "mlx":
+        parser.error(f"Unsupported model backend: {backend}")
+    elif server_cfg.get("worker_backend") == "splash":
+        parser.error(
+            "This installation uses Splash; select an MLX engine release before installing an MLX model"
+        )
     engine_port = server_cfg["port"]
     # An install always has a token; a checkout that never ran install.sh has
     # an open API and no api_key, and the generated config then carries an
@@ -225,28 +256,14 @@ def run_junie_config(argv: list[str]) -> None:
     # Set the default model in Junie settings. The file is the user's, so it is
     # read, one key is changed, and it is written back in Junie's own shape.
     custom_id = f"custom:{junie_model_id}"
+    settings = {}
     if os.path.isfile(junie_settings_path):
         with open(junie_settings_path, encoding="utf-8") as stream:
             settings = json.load(stream)
-        settings["modelForLaunch"] = custom_id
-        write_json(junie_settings_path, settings)
-        print(f"Default model set to {junie_model_id} in {junie_settings_path}")
-    else:
-        print(
-            f"WARNING: Junie settings not found at {junie_settings_path}",
-            file=sys.stderr,
-        )
-        print(
-            "The model config was created, but the default model was not set.",
-            file=sys.stderr,
-        )
-        print(
-            "Start Junie once so it creates settings.json, then re-run this command.",
-            file=sys.stderr,
-        )
-
-    print("Restart Junie to apply the changes.")
-    print("Control the engine with: ./serverctl.sh {start|stop|status|wait}")
+    settings["modelForLaunch"] = custom_id
+    write_json(junie_settings_path, settings)
+    print(f"Default model set to {junie_model_id} in {junie_settings_path}")
+    print("Restart Junie to use the selected model.")
 
 
 def main(argv=None) -> None:

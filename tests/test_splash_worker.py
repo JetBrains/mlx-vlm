@@ -84,6 +84,7 @@ def test_identity_mapping_preserves_tools_reasoning_and_sampling(config, tmp_pat
     updates, _ = store.validate({"auto_unload_time": 30})
     store.save(updates)
     assert store.current()["auto_unload_time"] == 30
+    assert (path.stat().st_mode & 0o777) == 0o600
     assert store.draft_model() == "v03"
 
 
@@ -106,3 +107,57 @@ def test_supervisor_propagates_child_failure():
         )
         == 7
     )
+
+
+def test_bundled_runtime_needs_no_checkout_or_external_python(
+    config, tmp_path, monkeypatch
+):
+    runtime = tmp_path / "relocated install" / "splash"
+    for file in ("python/bin/python3", "server/server.py", "engine/splash"):
+        path = runtime / file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    monkeypatch.setenv("JUNIE_SPLASH_RUNTIME", str(runtime))
+    del config["splash_python"]
+    del config["splash_source"]
+    args = command(config)
+    assert args[0] == str(runtime / "python/bin/python3")
+    assert args[args.index("--binary") + 1] == str(runtime / "engine/splash")
+
+
+def test_installer_selects_splash_and_creates_fresh_junie_default(
+    config, tmp_path, monkeypatch
+):
+    from mlx_vlm_gateway import cli
+
+    root = tmp_path / "install"
+    models = root / "models"
+    models.mkdir(parents=True)
+    package = models / "blend-package"
+    package.symlink_to(config["splash_package"], target_is_directory=True)
+    descriptor = {
+        "id": "local-blend",
+        "worker_backend": "splash",
+        "splash_package": "blend-package",
+        "draft_model": "v03",
+        "junieConfig": {"id": "blend", "apiKey": "$AUTH_TOKEN"},
+    }
+    (models / "blend.json").write_text(json.dumps(descriptor))
+    path = root / "server-config.json"
+    path.write_text(json.dumps(config))
+    monkeypatch.setenv("JUNIE_SERVER_CONFIG", str(path))
+    junie = tmp_path / "junie"
+    cli.run_junie_config([str(junie), "--model", "blend"])
+    saved = json.loads(path.read_text())
+    assert saved["model_name"] == "blend"
+    assert saved["splash_package"] == str(package)
+    assert saved["api_key"] == config["api_key"]
+    assert (path.stat().st_mode & 0o777) == 0o600
+    assert (
+        json.loads((junie / "settings.json").read_text())["modelForLaunch"]
+        == "custom:local-blend"
+    )
+    descriptor["splash_package"] = "../outside"
+    (models / "blend.json").write_text(json.dumps(descriptor))
+    with pytest.raises(SystemExit):
+        cli.run_junie_config([str(junie), "--model", "blend"])

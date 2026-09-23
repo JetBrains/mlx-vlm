@@ -1,9 +1,4 @@
-"""Experimental offline Splash worker for an already packed model.
-
-The gateway remains the owner of lifecycle, authentication and settings. This
-adapter runs a pinned Splash source checkout in its own Python environment;
-it does not import MLX or install/download anything.
-"""
+"""Splash worker owned by the Junie gateway, with a bundled offline runtime."""
 
 import argparse
 import json
@@ -11,6 +6,20 @@ import os
 import signal
 import subprocess
 from pathlib import Path
+
+
+def runtime_paths(config):
+    """Installed bundles resolve beside the launcher, never through PATH."""
+    bundled = os.environ.get("JUNIE_SPLASH_RUNTIME")
+    if bundled:
+        root = Path(bundled).resolve()
+        return root / "python/bin/python3", root, root / "engine/splash"
+    source = Path(config.get("splash_source", "")).expanduser().resolve()
+    return (
+        Path(config.get("splash_python", "")).expanduser(),
+        source,
+        source / "build/splash",
+    )
 
 
 def package_model(config):
@@ -25,15 +34,19 @@ def package_model(config):
 def validate_config(config):
     if config.get("worker_backend", "mlx") != "splash":
         return
-    for key in ("splash_python", "splash_source", "splash_package"):
+    for key in (
+        ("splash_package",)
+        if os.environ.get("JUNIE_SPLASH_RUNTIME")
+        else ("splash_python", "splash_source", "splash_package")
+    ):
         if not isinstance(config.get(key), str) or not config[key].strip():
             raise ValueError(f"Splash requires {key}")
-    source = Path(config["splash_source"]).expanduser()
+    python, source, binary = runtime_paths(config)
     package = Path(config["splash_package"]).expanduser()
     for path in (
-        Path(config["splash_python"]).expanduser(),
+        python,
         source / "server/server.py",
-        source / "build/splash",
+        binary,
         package / "manifest.json",
         package / "target",
         package / "draft",
@@ -51,10 +64,10 @@ def validate_config(config):
 
 def command(config):
     validate_config(config)
-    source = Path(config["splash_source"]).expanduser().resolve()
+    python, source, binary = runtime_paths(config)
     package = Path(config["splash_package"]).expanduser().resolve()
     args = [
-        str(Path(config["splash_python"]).expanduser().absolute()),
+        str(python.absolute()),
         str(source / "server/server.py"),
         str(package / "target"),
         str(package / "draft"),
@@ -63,7 +76,7 @@ def command(config):
         "--model",
         package_model(config),
         "--binary",
-        str(source / "build/splash"),
+        str(binary),
         "--host",
         "127.0.0.1",
         "--port",

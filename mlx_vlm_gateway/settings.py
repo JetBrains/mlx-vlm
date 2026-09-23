@@ -80,6 +80,7 @@ class SettingsStore:
         temporary = self.path.with_name(f".{self.path.name}.tmp")
         try:
             with temporary.open("w", encoding="utf-8") as stream:
+                os.chmod(temporary, 0o600)
                 json.dump(config, stream, indent=2)
                 stream.write("\n")
             os.replace(temporary, self.path)

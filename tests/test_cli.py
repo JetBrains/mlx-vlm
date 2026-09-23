@@ -183,8 +183,11 @@ def test_junie_config_without_settings_still_writes_the_model_config(install, ca
     cli.main(["--junie-config", str(junie_home), "--model", MODEL])
 
     assert (junie_home / "models" / "local-qwen3.6-27b-4bit.json").is_file()
-    assert not (junie_home / "settings.json").exists()
-    assert "settings not found" in capsys.readouterr().err
+    assert (
+        json.loads((junie_home / "settings.json").read_text())["modelForLaunch"]
+        == "custom:local-qwen3.6-27b-4bit"
+    )
+    assert not capsys.readouterr().err
 
 
 def test_junie_config_rejects_an_uninstalled_model(install, capsys):

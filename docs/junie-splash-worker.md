@@ -69,3 +69,33 @@ pinned-prefix and cache-management APIs are not implemented by Splash. Native
 cache reuse works independently. Packaging, installer changes and release
 publication are outside this prototype. Real Junie task quality, long-context
 latency and image round trips still need evaluation.
+
+## Distributable engine
+
+`packaging/build_splash.py --output dist/junie-splash-macos-arm64.tar.gz`
+produces the same single-root archive layout consumed by Junie's installer.
+The archive includes the gateway, `serverctl.sh`, checksum-pinned Splash 1.0.2,
+its standalone Python, native executable, Metal library and upstream license.
+The gateway dependencies are locked in `packaging/gateway-requirements.lock`.
+Build with Python 3.13+ and uv on Apple silicon. The installed archive does not
+need uv, system Python, an MLX environment, or a Splash source checkout.
+
+The launcher resolves its bundled runtime relative to itself; moving a complete
+installation does not preserve build-machine paths. The installer-owned model
+descriptor selects `worker_backend: splash` and a single-component
+`splash_package` below the managed models directory. `--junie-config` verifies
+the runtime/package before writing the engine configuration and profile. A
+fresh Junie home receives a default model selection as well as the profile.
+
+The gateway reports `capabilities.kv_quantization_configurable=false` from
+`/current_settings`. Splash 1.0.2 uses INT8 KV; the coordinated Junie branch
+shows this setting as fixed. Reject unsupported settings rather than silently
+changing their meaning. The model profile sets `extraBody.stop=[]` because
+Junie's legacy XML command stop string cannot be combined with Splash's native
+tool grammar. Reasoning and sampling settings remain explicit in that profile.
+
+The preview workflow builds artifacts only. It does not replace stable release
+metadata. The companion `JetBrains/junie` branch has a release staging tool
+that creates checksummed model/engine metadata and the normal installer. The
+companion Junie application branch reads backend capabilities and accepts
+`JUNIE_LOCAL_INSTALL_SCRIPT_URL` for an isolated release channel.

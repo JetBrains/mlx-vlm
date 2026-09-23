@@ -309,7 +309,15 @@ def create_app(
     @app.get("/current_settings")
     @app.get("/v1/current_settings", include_in_schema=False)
     async def current_settings(request: Request):
-        return settings_store(request).current()
+        store = settings_store(request)
+        return {
+            **store.current(),
+            **(
+                {"capabilities": {"kv_quantization_configurable": False}}
+                if store.is_splash()
+                else {}
+            ),
+        }
 
     @app.post("/apply_settings")
     @app.post("/v1/apply_settings", include_in_schema=False)
