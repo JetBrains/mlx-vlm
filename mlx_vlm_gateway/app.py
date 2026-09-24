@@ -574,7 +574,9 @@ def create_app(
             raise HTTPException(400, "Responses requires stream=true")
         if payload.get("model") not in (None, store.current()["model_name"]):
             raise HTTPException(404, "Model not found")
-        payload = store.inference_payload(payload)
+        if payload.get("store") is True or payload.get("previous_response_id"):
+            raise HTTPException(400, "Gateway recovery requires stateless Responses (store=false)")
+        payload = store.inference_payload({**payload, "store": False})
         sup = supervisor(request)
 
         async def ensure_ready():
