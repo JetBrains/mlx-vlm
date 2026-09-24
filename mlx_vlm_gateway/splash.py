@@ -56,6 +56,9 @@ def validate_config(config):
         if not path.exists():
             raise ValueError(f"Missing Splash runtime/package path: {path}")
     package_model(config)
+    limit = config.get("splash_max_memory_bytes")
+    if limit is not None and (type(limit) is not int or not 0 < limit <= 2**63 - 1):
+        raise ValueError("splash_max_memory_bytes must be a positive integer byte count")
     # The benchmark-pinned f58d36d runtime has fixed INT8 KV. Never claim
     # that the UI's BF16 setting was applied while silently retaining INT8.
     if config.get("kv_quantization") is not True:
@@ -83,6 +86,8 @@ def command(config):
         str(config["worker_port"]),
         "--no-webui",
     ]
+    if config.get("splash_max_memory_bytes") is not None:
+        args += ["--max-memory", str(config["splash_max_memory_bytes"])]
     if config.get("max_context_length") is not None:
         args += ["--max-context", str(config["max_context_length"])]
     if config.get("soft_request_timeout") is not None:

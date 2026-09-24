@@ -161,3 +161,13 @@ def test_installer_selects_splash_and_creates_fresh_junie_default(
     (models / "blend.json").write_text(json.dumps(descriptor))
     with pytest.raises(SystemExit):
         cli.run_junie_config([str(junie), "--model", "blend"])
+
+
+def test_explicit_memory_limit_is_forwarded_in_bytes(config):
+    config['splash_max_memory_bytes'] = 80 * 1024**3
+    args = command(config)
+    assert args[args.index('--max-memory') + 1] == str(80 * 1024**3)
+    for invalid in [0, -1, True, '80G']:
+        config['splash_max_memory_bytes'] = invalid
+        with pytest.raises(ValueError, match='splash_max_memory_bytes'):
+            command(config)
