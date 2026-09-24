@@ -233,3 +233,39 @@ def test_cancel_when_producer_is_blocked_on_full_queue_closes_upstream():
             assert closed.is_set()
 
     asyncio.run(run())
+
+
+def test_cleanup_survives_cancelled_anyio_response_scope():
+    import anyio
+
+    async def run():
+        closed = asyncio.Event()
+
+        class Body(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                while True:
+                    yield event("response.output_text.delta", delta="x").encode()
+
+            async def aclose(self):
+                await asyncio.sleep(0.01)
+                closed.set()
+
+        sup = SimpleNamespace(generation=1, requests_failed=0)
+
+        async def ready():
+            pass
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, stream=Body())
+            )
+        ) as client:
+            with anyio.CancelScope() as scope:
+                stream = proxy_responses(client, "http://worker", {}, {}, sup, ready, 2)
+                await anext(stream)
+                await asyncio.sleep(0.02)
+                scope.cancel()
+                await stream.aclose()
+            assert closed.is_set()
+
+    asyncio.run(run())

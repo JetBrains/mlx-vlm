@@ -7,6 +7,7 @@ import time
 import uuid
 from contextlib import aclosing
 
+import anyio
 import httpx
 
 
@@ -197,5 +198,8 @@ async def proxy_responses(
                     snapshot["output"][index] = event["item"]
             yield encode(event)
     finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        # Starlette cancels the response inside an AnyIO cancel scope. Shield
+        # cleanup so a second cancellation cannot interrupt HTTP socket close.
+        with anyio.CancelScope(shield=True):
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
