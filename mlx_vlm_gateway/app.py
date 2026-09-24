@@ -11,7 +11,7 @@ from typing import Callable, Optional, Sequence
 import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from mlx_vlm_shared.errors import (
     MEMORY_PRESSURE_ERROR_CODE,
@@ -556,6 +556,62 @@ def create_app(
 
         asyncio.get_running_loop().call_later(0.05, callback)
         return {"status": "shutting_down"}
+
+    @app.post("/v1/responses")
+    async def responses(request: Request):
+        from .responses import proxy_responses
+
+        store = settings_store(request)
+        if not store.is_splash():
+            raise HTTPException(400, "Responses requires the Splash backend")
+        if request.app.state.shutting_down:
+            raise HTTPException(503, "Gateway is stopping")
+        try:
+            payload = await request.json()
+        except ValueError as exc:
+            raise HTTPException(400, "Request body must be JSON") from exc
+        if not isinstance(payload, dict) or payload.get("stream") is not True:
+            raise HTTPException(400, "Responses requires stream=true")
+        if payload.get("model") not in (None, store.current()["model_name"]):
+            raise HTTPException(404, "Model not found")
+        payload = store.inference_payload(payload)
+        sup = supervisor(request)
+
+        async def ensure_ready():
+            async with request.app.state.lifecycle_lock:
+                if request.app.state.shutting_down:
+                    raise RuntimeError("Gateway is stopping")
+                if sup.state not in {"ready", "starting", "restarting"}:
+                    await sup.start_worker(wait_ready=False)
+            await sup.wait_until_ready()
+
+        async def stream():
+            sup.requests_forwarded += 1
+            sup.active_requests += 1
+            sup.last_activity_at = time.monotonic()
+            try:
+                async for chunk in proxy_responses(
+                    request.app.state.client,
+                    f"{settings.worker_url}/v1/responses",
+                    payload,
+                    {"content-type": "application/json", **worker_auth},
+                    sup,
+                    ensure_ready,
+                    settings.request_timeout_s,
+                ):
+                    yield chunk
+            except asyncio.CancelledError:
+                sup.requests_cancelled += 1
+                raise
+            finally:
+                sup.active_requests -= 1
+                sup.last_activity_at = time.monotonic()
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):

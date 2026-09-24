@@ -1763,3 +1763,46 @@ def test_splash_gateway_identity_and_settings(monkeypatch, tmp_path):
             client.post("/v1/chat/completions", json={"model": "other"}).status_code
             == 404
         )
+
+
+def test_streamed_responses_route_restarts_and_retries(monkeypatch, tmp_path):
+    from mlx_vlm_gateway.settings import SettingsStore
+
+    monkeypatch.setattr(SettingsStore, "is_splash", lambda self: True)
+    monkeypatch.setattr(
+        SettingsStore,
+        "inference_payload",
+        lambda self, p: {**p, "model": "packed-model"},
+    )
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"model_name": DEFAULT_MODEL}))
+    calls = []
+
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        if request.url.path == "/v1/responses":
+            calls.append(json.loads(request.content))
+            if len(calls) == 1:
+                return httpx.Response(
+                    503, json={"error": {"code": "runtime_unavailable"}}
+                )
+            return httpx.Response(
+                200,
+                text='data: {"type":"response.completed","response":{"id":"worker-id","status":"completed","output":[]}}\n\n',
+            )
+        raise AssertionError(request.url.path)
+
+    app, processes = _gateway(monkeypatch, handler, config_path=str(config))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/responses",
+            json={"model": DEFAULT_MODEL, "stream": True, "input": "hello"},
+        )
+        assert response.status_code == 200
+        assert "response.completed" in response.text
+        assert len(calls) == 2 and len(processes) == 2
+        assert calls[0] == calls[1]
+        assert calls[0]["model"] == "packed-model"
+        assert app.state.supervisor.active_requests == 0
+        assert client.post("/v1/responses", json={"stream": False}).status_code == 400
