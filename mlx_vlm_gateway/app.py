@@ -5,7 +5,7 @@ import os
 import secrets
 import signal
 import time
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from typing import Callable, Optional, Sequence
 
 import httpx
@@ -575,7 +575,9 @@ def create_app(
         if payload.get("model") not in (None, store.current()["model_name"]):
             raise HTTPException(404, "Model not found")
         if payload.get("store") is True or payload.get("previous_response_id"):
-            raise HTTPException(400, "Gateway recovery requires stateless Responses (store=false)")
+            raise HTTPException(
+                400, "Gateway recovery requires stateless Responses (store=false)"
+            )
         payload = store.inference_payload({**payload, "store": False})
         sup = supervisor(request)
 
@@ -592,16 +594,19 @@ def create_app(
             sup.active_requests += 1
             sup.last_activity_at = time.monotonic()
             try:
-                async for chunk in proxy_responses(
-                    request.app.state.client,
-                    f"{settings.worker_url}/v1/responses",
-                    payload,
-                    {"content-type": "application/json", **worker_auth},
-                    sup,
-                    ensure_ready,
-                    settings.request_timeout_s,
-                ):
-                    yield chunk
+                async with aclosing(
+                    proxy_responses(
+                        request.app.state.client,
+                        f"{settings.worker_url}/v1/responses",
+                        payload,
+                        {"content-type": "application/json", **worker_auth},
+                        sup,
+                        ensure_ready,
+                        settings.request_timeout_s,
+                    )
+                ) as upstream:
+                    async for chunk in upstream:
+                        yield chunk
             except asyncio.CancelledError:
                 sup.requests_cancelled += 1
                 raise

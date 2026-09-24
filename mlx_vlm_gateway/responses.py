@@ -5,6 +5,7 @@ import copy
 import json
 import time
 import uuid
+from contextlib import aclosing
 
 import httpx
 
@@ -104,33 +105,34 @@ async def proxy_responses(
                         await ensure_ready()
                         generation = supervisor.generation
                         terminal = False
-                        async for event in worker_events(
-                            client, url, payload, headers, timeout
-                        ):
-                            kind = event.get("type", "")
-                            error = (
-                                (event.get("response") or {}).get("error")
-                                or event.get("error")
-                                or {}
-                            )
-                            if (
-                                kind in {"response.failed", "error"}
-                                and error.get("code") == "runtime_unavailable"
-                            ):
-                                raise RecoverableWorkerError("runtime_unavailable")
-                            if kind in {"response.created", "response.in_progress"}:
-                                continue
-                            # Conservatively commit even item-added / reasoning events.
-                            visible = True
-                            await queue.put(event)
-                            if kind in {
-                                "response.completed",
-                                "response.incomplete",
-                                "response.failed",
-                                "error",
-                            }:
-                                terminal = True
-                                break
+                        async with aclosing(
+                            worker_events(client, url, payload, headers, timeout)
+                        ) as upstream:
+                            async for event in upstream:
+                                kind = event.get("type", "")
+                                error = (
+                                    (event.get("response") or {}).get("error")
+                                    or event.get("error")
+                                    or {}
+                                )
+                                if (
+                                    kind in {"response.failed", "error"}
+                                    and error.get("code") == "runtime_unavailable"
+                                ):
+                                    raise RecoverableWorkerError("runtime_unavailable")
+                                if kind in {"response.created", "response.in_progress"}:
+                                    continue
+                                # Conservatively commit even item-added / reasoning events.
+                                visible = True
+                                await queue.put(event)
+                                if kind in {
+                                    "response.completed",
+                                    "response.incomplete",
+                                    "response.failed",
+                                    "error",
+                                }:
+                                    terminal = True
+                                    break
                         if not terminal:
                             raise RecoverableWorkerError(
                                 "Worker stream ended without a terminal event"
