@@ -792,6 +792,24 @@ def test_second_consecutive_500_restarts_worker(monkeypatch):
         _wait_until(lambda: len(processes) == 2)
 
 
+def test_invalid_model_output_does_not_restart_worker(monkeypatch):
+    def handler(request):
+        if request.url.path == "/ready":
+            return httpx.Response(200, json={"status": "ready"})
+        return httpx.Response(500, json={"error": {"code": "invalid_model_output", "message": "malformed tool XML"}})
+
+    app, processes = _gateway(monkeypatch, handler)
+    with TestClient(app) as client:
+        _boot_worker(client)
+        _wait_until(lambda: client.get("/ready").status_code == 200)
+        for _ in range(6):
+            response = client.post("/v1/chat/completions", json={})
+            assert response.status_code == 500
+            assert response.json()["error"]["code"] == "invalid_model_output"
+        assert len(processes) == 1
+        assert app.state.supervisor.consecutive_500 == 0
+
+
 def test_worker_508_returns_503_and_restarts_worker(monkeypatch):
     def handler(request):
         if request.url.path == "/ready":

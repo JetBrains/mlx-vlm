@@ -860,8 +860,16 @@ def create_app(
                     "restarting. Retry shortly."
                 ),
             )
+        # Invalid generated output is a request failure, not engine corruption.
+        # Restarting here discards unrelated requests and their prefix caches.
+        try:
+            error_payload = response.json()
+        except ValueError:
+            error_payload = None
+        error = error_payload.get("error") if isinstance(error_payload, dict) else None
+        invalid_output = isinstance(error, dict) and error.get("code") == "invalid_model_output"
         if sup.record_worker_response(
-            response.status_code,
+            200 if invalid_output else response.status_code,
             generation=worker_generation,
         ):
             sup.requests_failed += 1
