@@ -5,13 +5,13 @@ import os
 import secrets
 import signal
 import time
-from contextlib import aclosing, asynccontextmanager
+from contextlib import asynccontextmanager
 from typing import Callable, Optional, Sequence
 
 import httpx
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 
 from mlx_vlm_shared.errors import (
     MEMORY_PRESSURE_ERROR_CODE,
@@ -46,6 +46,7 @@ from .supervisor import (
     auth_headers,
     worker_command,
 )
+
 
 logger = logging.getLogger("mlx_vlm.gateway")
 
@@ -91,7 +92,10 @@ def _is_confirmed_out_of_memory(response: httpx.Response) -> bool:
     except ValueError:
         return False
     error = payload.get("error") if isinstance(payload, dict) else None
-    return isinstance(error, dict) and error.get("code") == OUT_OF_MEMORY_ERROR_CODE
+    return (
+        isinstance(error, dict)
+        and error.get("code") == OUT_OF_MEMORY_ERROR_CODE
+    )
 
 
 def _server_error_response(code: str, message: str) -> JSONResponse:
@@ -309,8 +313,7 @@ def create_app(
     @app.get("/current_settings")
     @app.get("/v1/current_settings", include_in_schema=False)
     async def current_settings(request: Request):
-        store = settings_store(request)
-        return store.current()
+        return settings_store(request).current()
 
     @app.post("/apply_settings")
     @app.post("/v1/apply_settings", include_in_schema=False)
@@ -459,7 +462,9 @@ def create_app(
     async def models(request: Request):
         store = settings_store(request)
         installed = store.supported_models()
-        if store.is_splash() or any(m.get("worker_backend") == "splash" for m in installed.values()):
+        if store.is_splash() or any(
+            m.get("worker_backend") == "splash" for m in installed.values()
+        ):
             return {
                 "object": "list",
                 "data": [
@@ -553,69 +558,6 @@ def create_app(
 
         asyncio.get_running_loop().call_later(0.05, callback)
         return {"status": "shutting_down"}
-
-    @app.post("/v1/responses")
-    async def responses(request: Request):
-        from .responses import proxy_responses
-
-        store = settings_store(request)
-        if not store.is_splash():
-            raise HTTPException(400, "Responses requires the Splash backend")
-        if request.app.state.shutting_down:
-            raise HTTPException(503, "Gateway is stopping")
-        try:
-            payload = await request.json()
-        except ValueError as exc:
-            raise HTTPException(400, "Request body must be JSON") from exc
-        if not isinstance(payload, dict) or payload.get("stream") is not True:
-            raise HTTPException(400, "Responses requires stream=true")
-        if payload.get("model") not in (None, store.current()["model_name"]):
-            raise HTTPException(404, "Model not found")
-        if payload.get("store") is True or payload.get("previous_response_id"):
-            raise HTTPException(
-                400, "Gateway recovery requires stateless Responses (store=false)"
-            )
-        payload = store.inference_payload({**payload, "store": False})
-        sup = supervisor(request)
-
-        async def ensure_ready():
-            async with request.app.state.lifecycle_lock:
-                if request.app.state.shutting_down:
-                    raise RuntimeError("Gateway is stopping")
-                if sup.state not in {"ready", "starting", "restarting"}:
-                    await sup.start_worker(wait_ready=False)
-            await sup.wait_until_ready()
-
-        async def stream():
-            sup.requests_forwarded += 1
-            sup.active_requests += 1
-            sup.last_activity_at = time.monotonic()
-            try:
-                async with aclosing(
-                    proxy_responses(
-                        request.app.state.client,
-                        f"{settings.worker_url}/v1/responses",
-                        payload,
-                        {"content-type": "application/json", **worker_auth},
-                        sup,
-                        ensure_ready,
-                        store.request_timeout(settings.request_timeout_s),
-                    )
-                ) as upstream:
-                    async for chunk in upstream:
-                        yield chunk
-            except asyncio.CancelledError:
-                sup.requests_cancelled += 1
-                raise
-            finally:
-                sup.active_requests -= 1
-                sup.last_activity_at = time.monotonic()
-
-        return StreamingResponse(
-            stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
@@ -741,29 +683,14 @@ def create_app(
 
             payload = store.inference_payload(payload)
 
-            async def ensure_recovered():
-                await sup.wait_until_ready()
-
-            if store.is_splash():
-                from .completions import splash_completion
-
-                post = splash_completion(
-                    request.app.state.client,
-                    f"{settings.worker_url}/v1/chat/completions",
-                    payload,
-                    headers,
-                    store.request_timeout(settings.request_timeout_s),
-                    sup,
-                    ensure_recovered,
-                )
-            else:
-                post = request.app.state.client.post(
+            post_task = asyncio.create_task(
+                request.app.state.client.post(
                     f"{settings.worker_url}/v1/chat/completions",
                     json=payload,
                     headers=headers,
                     timeout=settings.request_timeout_s,
                 )
-            post_task = asyncio.create_task(post)
+            )
             disconnect_task = asyncio.create_task(_wait_for_disconnect(request))
             try:
                 await asyncio.wait(
@@ -781,7 +708,9 @@ def create_app(
                 except (asyncio.CancelledError, httpx.HTTPError):
                     pass
                 sup.requests_cancelled += 1
-                logger.info("Client disconnected; aborted in-flight worker request.")
+                logger.info(
+                    "Client disconnected; aborted in-flight worker request."
+                )
                 # 499: client closed request; nobody reads this.
                 return Response(status_code=499)
             response = post_task.result()
@@ -797,7 +726,9 @@ def create_app(
         except httpx.RequestError as exc:
             sup.requests_failed += 1
             worker_pid = None if worker_process is None else worker_process.pid
-            returncode = None if worker_process is None else worker_process.returncode
+            returncode = (
+                None if worker_process is None else worker_process.returncode
+            )
             if worker_process is not None and returncode is None:
                 try:
                     returncode = await asyncio.wait_for(
@@ -875,16 +806,8 @@ def create_app(
                     "restarting. Retry shortly."
                 ),
             )
-        # Invalid generated output is a request failure, not engine corruption.
-        # Restarting here discards unrelated requests and their prefix caches.
-        try:
-            error_payload = response.json()
-        except ValueError:
-            error_payload = None
-        error = error_payload.get("error") if isinstance(error_payload, dict) else None
-        invalid_output = isinstance(error, dict) and error.get("code") == "invalid_model_output"
         if sup.record_worker_response(
-            200 if invalid_output else response.status_code,
+            response.status_code,
             generation=worker_generation,
         ):
             sup.requests_failed += 1

@@ -240,14 +240,28 @@ def run_junie_config(argv: list[str]) -> None:
     # Set the default model in Junie settings. The file is the user's, so it is
     # read, one key is changed, and it is written back in Junie's own shape.
     custom_id = f"custom:{junie_model_id}"
-    settings = {}
     if os.path.isfile(junie_settings_path):
         with open(junie_settings_path, encoding="utf-8") as stream:
             settings = json.load(stream)
-    settings["modelForLaunch"] = custom_id
-    write_json(junie_settings_path, settings)
-    print(f"Default model set to {junie_model_id} in {junie_settings_path}")
-    print("Restart Junie to use the selected model.")
+        settings["modelForLaunch"] = custom_id
+        write_json(junie_settings_path, settings)
+        print(f"Default model set to {junie_model_id} in {junie_settings_path}")
+    else:
+        print(
+            f"WARNING: Junie settings not found at {junie_settings_path}",
+            file=sys.stderr,
+        )
+        print(
+            "The model config was created, but the default model was not set.",
+            file=sys.stderr,
+        )
+        print(
+            "Start Junie once so it creates settings.json, then re-run this command.",
+            file=sys.stderr,
+        )
+
+    print("Restart Junie to apply the changes.")
+    print("Control the engine with: ./serverctl.sh {start|stop|status|wait}")
 
 
 def main(argv=None) -> None:

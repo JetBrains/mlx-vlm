@@ -71,11 +71,6 @@ def validate_config(config):
         if not path.exists():
             raise ValueError(f"Missing Splash runtime/package path: {path}")
     package_model(config)
-    limit = config.get("splash_max_memory_bytes")
-    if limit is not None and (type(limit) is not int or not 0 < limit <= 2**63 - 1):
-        raise ValueError(
-            "splash_max_memory_bytes must be a positive integer byte count"
-        )
 
 
 def command(config):
@@ -99,15 +94,11 @@ def command(config):
         str(config["worker_port"]),
         "--no-webui",
     ]
-    if config.get("splash_max_memory_bytes") is not None:
-        args += ["--max-memory", str(config["splash_max_memory_bytes"])]
     if config.get("max_context_length") is not None:
         args += ["--max-context", str(config["max_context_length"])]
     args += ["--kv-format", "int8" if config["kv_quantization"] else "bf16"]
-    args += [
-        "--request-timeout",
-        str(config.get("splash_soft_request_timeout_s", 3540)),
-    ]
+    if config.get("soft_request_timeout") is not None:
+        args += ["--request-timeout", str(config["soft_request_timeout"])]
     return args
 
 

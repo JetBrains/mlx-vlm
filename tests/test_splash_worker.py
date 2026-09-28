@@ -134,7 +134,7 @@ def test_bundled_runtime_needs_no_checkout_or_external_python(
     assert args[args.index("--binary") + 1] == str(runtime / "engine/splash")
 
 
-def test_installer_selects_splash_and_creates_fresh_junie_default(
+def test_installer_selects_splash_and_sets_junie_default(
     config, tmp_path, monkeypatch
 ):
     from mlx_vlm_gateway import cli
@@ -156,6 +156,8 @@ def test_installer_selects_splash_and_creates_fresh_junie_default(
     path.write_text(json.dumps(config))
     monkeypatch.setenv("JUNIE_SERVER_CONFIG", str(path))
     junie = tmp_path / "junie"
+    junie.mkdir()
+    (junie / "settings.json").write_text("{}")
     cli.run_junie_config([str(junie), "--model", "blend"])
     saved = json.loads(path.read_text())
     assert saved["model_name"] == "blend"
@@ -170,16 +172,6 @@ def test_installer_selects_splash_and_creates_fresh_junie_default(
     (models / "blend.json").write_text(json.dumps(descriptor))
     with pytest.raises(SystemExit):
         cli.run_junie_config([str(junie), "--model", "blend"])
-
-
-def test_explicit_memory_limit_is_forwarded_in_bytes(config):
-    config["splash_max_memory_bytes"] = 80 * 1024**3
-    args = command(config)
-    assert args[args.index("--max-memory") + 1] == str(80 * 1024**3)
-    for invalid in [0, -1, True, "80G"]:
-        config["splash_max_memory_bytes"] = invalid
-        with pytest.raises(ValueError, match="splash_max_memory_bytes"):
-            command(config)
 
 
 @pytest.mark.parametrize("version", ["26.0", "26.3.1", "25.9", ""])

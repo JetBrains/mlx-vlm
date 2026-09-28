@@ -62,28 +62,19 @@ is incompatible with native tool calls. No API switch is required.
   manifest's model ID for Splash while preserving tools, sampling and history.
 - `kv_quantization=true` selects INT8 KV; false selects BF16 KV. The existing UI
   toggle works for both workers. Changing it restarts an idle worker.
-- Splash has a 3,600-second gateway deadline and 3,540-second worker deadline;
-  MLX retains its existing deadlines. Configuration keys are
-  `splash_request_timeout_s` and `splash_soft_request_timeout_s`.
+- Both workers use the existing gateway request timeout and configured
+  `soft_request_timeout`; this integration adds no separate timeout policy.
 - Health, authentication, settings, startup, unload, idle unload, shutdown and
   cancellation remain gateway responsibilities. Splash listens on loopback.
 - Splash owns its native prefix cache. MLX-specific APC and cache-management
   endpoints do not describe or control that cache.
-- A non-streaming request can recover from `runtime_unavailable` or a broken
-  worker connection, with at most three attempts under one gateway deadline.
-  Invalid model output does not restart the worker or trigger a blind replay.
+- Chat Completions uses the existing gateway forwarding and error handling.
+  The adapter does not replay failed requests.
 - The adapter owns the Splash process group and cleans up native descendants
   when it stops or loses its parent. The API key is passed through the
   environment, never command-line arguments.
-- `splash_max_memory_bytes` optionally sets Splash's allocation budget. Without
-  it the runtime uses its own memory policy. `/status.backend.status` exposes
-  Splash telemetry; it does not relabel Metal allocation as process RSS.
-
-The gateway also supports streamed Responses for integrations that need it:
-data-bearing progress events, monotonic sequence numbers, cancellation, and
-recovery only before any model output is exposed. The Nightly local profile
-uses Chat Completions. Neither tunnel behavior nor Responses recovery is a
-prerequisite for local inference.
+- Splash uses its own memory policy. `/status.backend.status` exposes its
+  telemetry without relabeling Metal allocation as process RSS.
 
 ## Development and validation
 
@@ -93,9 +84,9 @@ an isolated `JUNIE_SERVER_CONFIG`. Packaged installations resolve the runtime
 relative to the launcher instead. Never point a development test at a user's
 installed configuration.
 
-Run the gateway, CLI, settings, Responses and Splash-worker tests. Before
+Run the gateway, CLI, settings and Splash-worker tests. Before
 release, extract the actual archive and test MLX/Splash/MLX switching, tool
-calls and follow-ups, idle reload, both KV formats, cancellation, engine
-recovery and an unmodified Junie task. Unit tests do not establish Metal
+calls and follow-ups, idle reload, both KV formats, cancellation and an
+unmodified Junie task. Unit tests do not establish Metal
 execution or long-context quality. Installer rollback and broad hardware,
 concurrency and long-session qualification remain separate release concerns.

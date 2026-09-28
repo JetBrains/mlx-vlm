@@ -15,6 +15,7 @@ from mlx_vlm_shared.server_settings import (
     normalize_config,
 )
 
+
 logger = logging.getLogger("mlx_vlm.gateway")
 
 __all__ = [
@@ -118,13 +119,6 @@ class SettingsStore:
             }
         return models
 
-    def request_timeout(self, default: float) -> float:
-        return (
-            float(self._config.get("splash_request_timeout_s", 3600))
-            if self.is_splash()
-            else default
-        )
-
     def models_dir(self) -> str:
         return self._config.get("models_dir", DEFAULT_CONFIG["models_dir"])
 
@@ -152,7 +146,8 @@ class SettingsStore:
             supported = self.supported_models()
             if updates["model_name"] not in supported:
                 raise SettingsValidationError(
-                    "Unsupported model. Available models: " f"{', '.join(supported)}"
+                    "Unsupported model. Available models: "
+                    f"{', '.join(supported)}"
                 )
 
         for key in ("max_context_length", "auto_unload_time"):

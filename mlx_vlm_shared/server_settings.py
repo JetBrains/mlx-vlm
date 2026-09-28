@@ -11,6 +11,7 @@ import logging
 import os
 from typing import Optional
 
+
 logger = logging.getLogger("mlx_vlm.config")
 
 CONFIG_PATH_ENV = "JUNIE_SERVER_CONFIG"
@@ -30,8 +31,6 @@ RESTART_SETTING_KEYS = {
 
 DEFAULT_CONFIG = {
     "worker_backend": "mlx",
-    "splash_request_timeout_s": 3600.0,
-    "splash_soft_request_timeout_s": 3540.0,
     "model_name": "Qwen3.6-27B-MLX-4bit",
     # Multi-token-prediction speculative-decoding drafter for the model
     # above. It has no standalone language_model head, so it is only ever
@@ -230,8 +229,6 @@ _VALIDATORS = {
     "ngram_max": _is_int_in(1, 1024),
     "startup_timeout_s": _is_positive_number,
     "request_timeout_s": _is_positive_number,
-    "splash_request_timeout_s": _is_positive_number,
-    "splash_soft_request_timeout_s": _is_positive_number,
     "startup_probe_interval_s": _is_positive_number,
     "probe_interval_s": _is_positive_number,
     "probe_timeout_s": _is_positive_number,
