@@ -310,14 +310,7 @@ def create_app(
     @app.get("/v1/current_settings", include_in_schema=False)
     async def current_settings(request: Request):
         store = settings_store(request)
-        return {
-            **store.current(),
-            **(
-                {"capabilities": {"kv_quantization_configurable": False}}
-                if store.is_splash()
-                else {}
-            ),
-        }
+        return store.current()
 
     @app.post("/apply_settings")
     @app.post("/v1/apply_settings", include_in_schema=False)
@@ -360,6 +353,8 @@ def create_app(
             def persist_updates() -> dict:
                 try:
                     return store.save(updates)
+                except SettingsValidationError as exc:
+                    raise HTTPException(400, str(exc)) from exc
                 except OSError as exc:
                     logger.error("Failed to save settings: %s", exc)
                     raise HTTPException(
@@ -463,15 +458,17 @@ def create_app(
     @app.get("/v1/models", include_in_schema=False)
     async def models(request: Request):
         store = settings_store(request)
-        if store.is_splash():
+        installed = store.supported_models()
+        if store.is_splash() or any(m.get("worker_backend") == "splash" for m in installed.values()):
             return {
                 "object": "list",
                 "data": [
                     {
-                        "id": store.current()["model_name"],
+                        "id": model_id,
                         "object": "model",
                         "created": 0,
                     }
+                    for model_id in installed
                 ],
             }
         if supervisor(request).state == "ready":
@@ -602,7 +599,7 @@ def create_app(
                         {"content-type": "application/json", **worker_auth},
                         sup,
                         ensure_ready,
-                        settings.request_timeout_s,
+                        store.request_timeout(settings.request_timeout_s),
                     )
                 ) as upstream:
                     async for chunk in upstream:
@@ -669,7 +666,6 @@ def create_app(
                     }
                 },
             )
-        payload = store.inference_payload(payload)
         payload["stream"] = False
         headers = {"content-type": "application/json", **worker_auth}
         for name in ("x-apc-tenant", "x-tenant-id"):
@@ -713,6 +709,8 @@ def create_app(
                         )
                         try:
                             store.save({"model_name": requested_model})
+                        except SettingsValidationError as exc:
+                            raise HTTPException(400, str(exc)) from exc
                         except OSError as exc:
                             logger.error("Failed to save settings: %s", exc)
                             raise HTTPException(
@@ -741,14 +739,31 @@ def create_app(
             worker_process = sup.process
             request_log_position = capture_log_position(settings.worker_log_path)
 
-            post_task = asyncio.create_task(
-                request.app.state.client.post(
+            payload = store.inference_payload(payload)
+
+            async def ensure_recovered():
+                await sup.wait_until_ready()
+
+            if store.is_splash():
+                from .completions import splash_completion
+
+                post = splash_completion(
+                    request.app.state.client,
+                    f"{settings.worker_url}/v1/chat/completions",
+                    payload,
+                    headers,
+                    store.request_timeout(settings.request_timeout_s),
+                    sup,
+                    ensure_recovered,
+                )
+            else:
+                post = request.app.state.client.post(
                     f"{settings.worker_url}/v1/chat/completions",
                     json=payload,
                     headers=headers,
                     timeout=settings.request_timeout_s,
                 )
-            )
+            post_task = asyncio.create_task(post)
             disconnect_task = asyncio.create_task(_wait_for_disconnect(request))
             try:
                 await asyncio.wait(

@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import platform
 import signal
 import subprocess
 from pathlib import Path
@@ -34,6 +35,20 @@ def package_model(config):
 def validate_config(config):
     if config.get("worker_backend", "mlx") != "splash":
         return
+    if os.environ.get("JUNIE_SPLASH_RUNTIME"):
+        version = platform.mac_ver()[0]
+        try:
+            supported = tuple(int(x) for x in version.split(".")[:2]) >= (26, 4)
+        except ValueError:
+            supported = False
+        if (
+            platform.system() != "Darwin"
+            or platform.machine() != "arm64"
+            or not supported
+        ):
+            raise ValueError(
+                "Bundled Splash requires Apple silicon and macOS 26.4 or newer"
+            )
     for key in (
         ("splash_package",)
         if os.environ.get("JUNIE_SPLASH_RUNTIME")
@@ -58,11 +73,9 @@ def validate_config(config):
     package_model(config)
     limit = config.get("splash_max_memory_bytes")
     if limit is not None and (type(limit) is not int or not 0 < limit <= 2**63 - 1):
-        raise ValueError("splash_max_memory_bytes must be a positive integer byte count")
-    # The benchmark-pinned f58d36d runtime has fixed INT8 KV. Never claim
-    # that the UI's BF16 setting was applied while silently retaining INT8.
-    if config.get("kv_quantization") is not True:
-        raise ValueError("This Splash adapter requires kv_quantization=true (INT8)")
+        raise ValueError(
+            "splash_max_memory_bytes must be a positive integer byte count"
+        )
 
 
 def command(config):
@@ -90,8 +103,11 @@ def command(config):
         args += ["--max-memory", str(config["splash_max_memory_bytes"])]
     if config.get("max_context_length") is not None:
         args += ["--max-context", str(config["max_context_length"])]
-    if config.get("soft_request_timeout") is not None:
-        args += ["--request-timeout", str(config["soft_request_timeout"])]
+    args += ["--kv-format", "int8" if config["kv_quantization"] else "bf16"]
+    args += [
+        "--request-timeout",
+        str(config.get("splash_soft_request_timeout_s", 3540)),
+    ]
     return args
 
 
@@ -139,6 +155,8 @@ def main():
     argparse.ArgumentParser(description=__doc__).parse_args()
     config = load_config()
     env = dict(os.environ)
+    # Runtime dependencies stay independent of the gateway dependency set.
+    env.pop("PYTHONPATH", None)
     # Keep the credential out of argv, logs and the process listing.
     if config.get("api_key"):
         env["SPLASH_API_KEY"] = config["api_key"]

@@ -30,6 +30,8 @@ RESTART_SETTING_KEYS = {
 
 DEFAULT_CONFIG = {
     "worker_backend": "mlx",
+    "splash_request_timeout_s": 3600.0,
+    "splash_soft_request_timeout_s": 3540.0,
     "model_name": "Qwen3.6-27B-MLX-4bit",
     # Multi-token-prediction speculative-decoding drafter for the model
     # above. It has no standalone language_model head, so it is only ever
@@ -160,6 +162,13 @@ def discover_supported_models(models_dir: Optional[str] = None) -> dict:
                 "draft_model": drafter,
                 "draft_kind": kind if isinstance(kind, str) and kind.strip() else None,
             }
+            backend = descriptor.get("worker_backend", "mlx")
+            if backend == "splash":
+                models[entry[:-5]].update(
+                    worker_backend="splash", splash_package=descriptor.get("splash_package")
+                )
+            elif backend != "mlx":
+                models.pop(entry[:-5])
     return models
 
 
@@ -221,6 +230,8 @@ _VALIDATORS = {
     "ngram_max": _is_int_in(1, 1024),
     "startup_timeout_s": _is_positive_number,
     "request_timeout_s": _is_positive_number,
+    "splash_request_timeout_s": _is_positive_number,
+    "splash_soft_request_timeout_s": _is_positive_number,
     "startup_probe_interval_s": _is_positive_number,
     "probe_interval_s": _is_positive_number,
     "probe_timeout_s": _is_positive_number,

@@ -108,14 +108,22 @@ class SettingsStore:
         return {**payload, "model": package_model(self._config)}
 
     def supported_models(self) -> dict:
-        if self.is_splash():
-            return {
-                self._config["model_name"]: {
-                    "draft_model": self.draft_model(),
-                    "draft_kind": "dflash",
-                }
+        models = discover_supported_models(self.models_dir())
+        # Retain explicit development configurations without installed descriptors.
+        if self.is_splash() and self._config["model_name"] not in models:
+            models[self._config["model_name"]] = {
+                "draft_model": self.draft_model(),
+                "draft_kind": "dflash",
+                "worker_backend": "splash",
             }
-        return discover_supported_models(self.models_dir())
+        return models
+
+    def request_timeout(self, default: float) -> float:
+        return (
+            float(self._config.get("splash_request_timeout_s", 3600))
+            if self.is_splash()
+            else default
+        )
 
     def models_dir(self) -> str:
         return self._config.get("models_dir", DEFAULT_CONFIG["models_dir"])
@@ -157,8 +165,6 @@ class SettingsStore:
             "kv_quantization", updates["kv_quantization"]
         ):
             raise SettingsValidationError('"kv_quantization" must be a boolean.')
-        if self.is_splash() and updates.get("kv_quantization") is False:
-            raise SettingsValidationError("This Splash runtime supports INT8 KV only.")
         return updates, force
 
     def save(self, updates: dict) -> dict:
@@ -172,7 +178,18 @@ class SettingsStore:
             updates.setdefault("draft_model", supported["draft_model"])
             if supported["draft_kind"] is not None:
                 updates.setdefault("draft_kind", supported["draft_kind"])
-        config, invalid = normalize_config({**self._config, **updates})
+        selected = {**self._config, **updates}
+        if supported is not None and (
+            supported.get("worker_backend") != "splash"
+            or supported.get("splash_package")
+        ):
+            from .model_config import select_model
+
+            try:
+                selected = select_model(selected, updates["model_name"], supported)
+            except ValueError as exc:
+                raise SettingsValidationError(str(exc)) from exc
+        config, invalid = normalize_config(selected)
         if invalid:
             raise SettingsValidationError(f"Invalid settings: {sorted(invalid)}")
         self._write(config)

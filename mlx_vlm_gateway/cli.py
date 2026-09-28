@@ -95,6 +95,11 @@ def run_worker(argv: list[str]) -> None:
         splash_main()
         return
 
+    bundled_mlx = os.environ.get("JUNIE_MLX_WORKER")
+    if bundled_mlx:
+        # Keep the published MLX worker and all its inference dependencies unchanged.
+        os.execv(bundled_mlx, [bundled_mlx, "worker", *argv])
+
     from mlx_vlm.server.junie.launch import main as worker_main
 
     worker_main()
@@ -201,36 +206,15 @@ def run_junie_config(argv: list[str]) -> None:
     # Read server config to resolve template variables. load_config merges the
     # defaults, so every key it is asked for is present.
     server_cfg = load_config(server_config_path)
-    backend = model_cfg.get("worker_backend", "mlx")
-    if backend == "splash":
-        from mlx_vlm_gateway.splash import validate_config
+    from mlx_vlm_gateway.model_config import select_model
 
-        # Descriptor-selected package lives inside the managed models directory.
-        # Do not accept absolute paths or traversals from downloaded metadata.
-        package_name = model_cfg.get("splash_package")
-        if (
-            not isinstance(package_name, str)
-            or not package_name
-            or package_name in (".", "..")
-            or os.path.basename(package_name) != package_name
-        ):
-            parser.error("Invalid Splash package name in model descriptor")
-        server_cfg.update(
-            worker_backend="splash",
-            splash_package=os.path.join(models_dir, package_name),
-            model_name=args.model,
-            models_dir=models_dir,
-            draft_model=model_cfg.get("draft_model"),
-            kv_quantization=True,
+    try:
+        server_cfg = select_model(
+            {**server_cfg, "models_dir": models_dir}, args.model, model_cfg
         )
-        validate_config(server_cfg)
-        write_json(server_config_path, server_cfg)
-    elif backend != "mlx":
-        parser.error(f"Unsupported model backend: {backend}")
-    elif server_cfg.get("worker_backend") == "splash":
-        parser.error(
-            "This installation uses Splash; select an MLX engine release before installing an MLX model"
-        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    write_json(server_config_path, server_cfg)
     engine_port = server_cfg["port"]
     # An install always has a token; a checkout that never ran install.sh has
     # an open API and no api_key, and the generated config then carries an

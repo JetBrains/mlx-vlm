@@ -1,6 +1,6 @@
 {
-  "version": "1.0.2",
-  "url": "https://github.com/incoai/splash/releases/download/1.0.2/splash-1.0.2-arm64-macos26.tar.gz",
-  "sha256": "552c37b12bee419588337600612059d731484995c3c2a8478dcf5e0b9fe5d384",
+  "version": "1.1.0",
+  "url": "https://github.com/incoai/splash/releases/download/1.1.0/splash-1.1.0-arm64-macos26.tar.gz",
+  "sha256": "255be83f404b1e31e4d98a863ccce05004d348fb6662c68afced4ff992402437",
   "minimum_macos": "26.4"
 }

@@ -1,155 +1,101 @@
-# Experimental Splash worker
+# Splash in the Junie Local Nightly preview
 
-The Junie gateway can supervise a Splash worker instead of MLX. MLX remains the
-default (`worker_backend: "mlx"`). The installer and published engine are
-unchanged. This is an offline source-checkout prototype, not a shipped runtime.
+The preview keeps the existing MLX path and adds Splash behind the same gateway.
+Junie selects an installed model using its existing local-model interface. The
+model descriptor selects the worker; neither Junie nor junie-agent needs a
+Splash-specific launcher or settings implementation.
 
-Use the maintained `JetBrains/mlx-vlm` repository's `junie-mlx-vlm` branch. The
-old `JetBrains/junie-mlx-vlm` repository has moved here.
+## Packaging and release
 
-## Configuration
+`packaging/build_splash.py --output dist/junie-local-splash-preview-macos-arm64.tar.gz`
+builds the single-root `junie-mlx-vlm/` archive used by the existing installer.
+It contains:
 
-Start from a separate `server-config.json`, using separate public/worker ports.
-Set `JUNIE_SERVER_CONFIG` to its absolute path. Example (replace all paths and
-supply a fresh private API key):
+- The gateway and its hash-locked dependencies in `gateway-deps/`.
+- The published MLX 0.3.2 worker, unchanged, in `runtime/mlx/`.
+- Splash 1.1.0, its standalone Python, native executable, Metal library and
+  upstream license in `splash/`.
+- `serverctl.sh`, a relative-path launcher, runtime pins and `build-info.json`.
+
+The two runtime archives have independent SHA-256 pins in `packaging/`.
+The build records the gateway commit, dirty state and dependency-lock hash.
+Build on Apple silicon using Python 3.13+ and uv. Users need neither uv, a
+system Python, source checkouts nor a separately installed inference engine.
+Splash dependencies are isolated from the gateway and frozen MLX dependencies.
+
+The EAP engine catalog supplies this combined archive; the EAP model catalog
+adds a separate Splash model choice and keeps existing MLX entries. Nightly
+already uses the EAP catalog. Stable metadata is unchanged. Publish immutable
+engine/model artifacts and verify their checksums before merging catalog URLs.
+This is an interim macOS distribution; migration into junie-local's common
+platform/runtime packaging can follow independently.
+
+## Model selection
+
+The installed model descriptor contains:
 
 ```json
 {
   "worker_backend": "splash",
-  "splash_python": "/path/to/splash/.venv/bin/python",
-  "splash_source": "/path/to/splash",
-  "splash_package": "/path/to/packed-blend-v03",
-  "model_name": "Qwen3.8-3.6-27B-blend-MLX-4bit",
+  "splash_package": "Qwen3.8-3.6-27B-blend-Splash-v0.3",
   "draft_model": "Qwen3.8-27B-test-DFlash2-v0.3",
-  "draft_kind": "dflash",
-  "host": "127.0.0.1",
-  "port": 19539,
-  "worker_port": 19540,
-  "api_key": "replace-with-a-private-key",
-  "kv_quantization": true,
-  "auto_unload_time": 60
+  "draft_kind": "dflash"
 }
 ```
 
-Launch the gateway with `python -m mlx_vlm_gateway.cli daemon` from this
-checkout, using an environment with the gateway dependencies installed.
-Its worker uses `splash_python`, not that gateway interpreter. No model or
-runtime is downloaded by the adapter. The package must contain `manifest.json`,
-`target/`, `draft/`, `vision/` and `tokenizer/`; ordinary MLX weights do not work.
-Use a verified package and pinned source/binary. The initial target is the
-benchmark runtime `incoai/splash@f58d36ddb046726adc8937ab67d07bdde015c0d6`.
+The package must be a single directory under the managed models directory,
+containing `manifest.json`, `target/`, `draft/`, `vision/` and `tokenizer/`.
+It uses Splash's packed format, not MLX safetensors. The adapter validates the
+package and requires Apple silicon with macOS 26.4+ before persisting a Splash
+selection. The existing installer continues to require M5 or newer; MLX keeps
+its existing OS requirements. Switching back to MLX restores that model's own
+drafter pair. A busy worker rejects a model switch with HTTP 409.
 
-## Behavior
+`--junie-config` writes the usual custom model profile. The Splash profile uses
+Chat Completions, reasoning low, temperature 1.0, top-p 0.95, top-k 20 and
+`extraBody.stop=[]`. This overrides the legacy XML command stop string, which
+is incompatible with native tool calls. No API switch is required.
 
-- Junie's public model ID stays stable. The gateway substitutes the package
-  manifest's model ID for worker requests; completion responses retain Splash's
-  actual package identity. Tools, reasoning history and sampling are passed
-  through. The gateway retains its existing non-streaming behavior.
-- Gateway health, status, settings, authentication, unload, shutdown, idle
-  unloading, on-demand startup and error recovery remain owned by the gateway.
-- Splash listens on loopback at `worker_port`; its credential is passed through
-  the environment, never command-line arguments.
-- The wrapper owns the Splash HTTP/native process group and tears it down on
-  normal exit, child failure, or loss of its gateway parent.
-- `/status.backend.status` exposes native Splash telemetry. The existing MLX
-  footprint/cache fields remain empty rather than mislabeling Metal allocation
-  bytes as process memory.
-- Context limits and the soft request timeout are passed to Splash. Existing
-  gateway deadlines still apply. No extra memory ceiling is imposed.
+## Serving and lifecycle
 
-## Prototype limitations
+- Public requests use the catalog model ID. The gateway substitutes the packed
+  manifest's model ID for Splash while preserving tools, sampling and history.
+- `kv_quantization=true` selects INT8 KV; false selects BF16 KV. The existing UI
+  toggle works for both workers. Changing it restarts an idle worker.
+- Splash has a 3,600-second gateway deadline and 3,540-second worker deadline;
+  MLX retains its existing deadlines. Configuration keys are
+  `splash_request_timeout_s` and `splash_soft_request_timeout_s`.
+- Health, authentication, settings, startup, unload, idle unload, shutdown and
+  cancellation remain gateway responsibilities. Splash listens on loopback.
+- Splash owns its native prefix cache. MLX-specific APC and cache-management
+  endpoints do not describe or control that cache.
+- A non-streaming request can recover from `runtime_unavailable` or a broken
+  worker connection, with at most three attempts under one gateway deadline.
+  Invalid model output does not restart the worker or trigger a blind replay.
+- The adapter owns the Splash process group and cleans up native descendants
+  when it stops or loses its parent. The API key is passed through the
+  environment, never command-line arguments.
+- `splash_max_memory_bytes` optionally sets Splash's allocation budget. Without
+  it the runtime uses its own memory policy. `/status.backend.status` exposes
+  Splash telemetry; it does not relabel Metal allocation as process RSS.
 
-This pinned runtime supports INT8 KV only. `kv_quantization=false` is rejected
-before startup or a settings update; it is not silently ignored. Support for
-newer Splash BF16-KV options requires a separately validated runtime update.
+The gateway also supports streamed Responses for integrations that need it:
+data-bearing progress events, monotonic sequence numbers, cancellation, and
+recovery only before any model output is exposed. The Nightly local profile
+uses Chat Completions. Neither tunnel behavior nor Responses recovery is a
+prerequisite for local inference.
 
-Only the configured package is exposed. Switching to another installed MLX
-model is rejected; multi-package selection is a follow-up. MLX-specific APC,
-pinned-prefix and cache-management APIs are not implemented by Splash. Native
-cache reuse works independently. Packaging, installer changes and release
-publication are outside this prototype. Real Junie task quality, long-context
-latency and image round trips still need evaluation.
+## Development and validation
 
-## Distributable engine
+For source development, configure `splash_python`, `splash_source` and
+`splash_package`, set `worker_backend` to `splash`, and use separate ports and
+an isolated `JUNIE_SERVER_CONFIG`. Packaged installations resolve the runtime
+relative to the launcher instead. Never point a development test at a user's
+installed configuration.
 
-`packaging/build_splash.py --output dist/junie-splash-macos-arm64.tar.gz`
-produces the same single-root archive layout consumed by Junie's installer.
-The archive includes the gateway, `serverctl.sh`, checksum-pinned Splash 1.0.2,
-its standalone Python, native executable, Metal library and upstream license.
-The gateway dependencies are locked in `packaging/gateway-requirements.lock`.
-Build with Python 3.13+ and uv on Apple silicon. The installed archive does not
-need uv, system Python, an MLX environment, or a Splash source checkout.
-
-The launcher resolves its bundled runtime relative to itself; moving a complete
-installation does not preserve build-machine paths. The installer-owned model
-descriptor selects `worker_backend: splash` and a single-component
-`splash_package` below the managed models directory. `--junie-config` verifies
-the runtime/package before writing the engine configuration and profile. A
-fresh Junie home receives a default model selection as well as the profile.
-
-The gateway reports `capabilities.kv_quantization_configurable=false` from
-`/current_settings`. Splash 1.0.2 uses INT8 KV; the coordinated Junie branch
-shows this setting as fixed. Reject unsupported settings rather than silently
-changing their meaning. The model profile sets `extraBody.stop=[]` because
-Junie's legacy XML command stop string cannot be combined with Splash's native
-tool grammar. Reasoning and sampling settings remain explicit in that profile.
-
-The preview workflow builds artifacts only. It does not replace stable release
-metadata. The companion `JetBrains/junie` branch has a release staging tool
-that creates checksummed model/engine metadata and the normal installer. The
-companion Junie application branch reads backend capabilities and accepts
-`JUNIE_LOCAL_INSTALL_SCRIPT_URL` for an isolated release channel.
-
-## Streamed Responses and recovery
-
-The gateway supports `POST /v1/responses` for Splash with `stream: true`.
-Authentication and configured model validation are applied before opening the
-stream. The public model name maps to the packed worker model as for Chat
-Completions. Chat Completions behavior is unchanged.
-
-The adapter assigns one public response ID and monotonic event sequence numbers.
-It sends data-bearing `response.in_progress` events every 15 seconds while
-waiting, including worker startup/recovery; it does not rely on SSE comments.
-Request accounting stays active until the stream closes, preventing idle unload.
-Client disconnection cancels the worker HTTP stream.
-
-A `runtime_unavailable` failure, connection failure, or premature stream end
-can restart the supervised worker and retry up to three total attempts within
-one configured request deadline. Retries happen only before any output event
-(including reasoning or tool-item creation) has been exposed. After output,
-the adapter emits `response.failed` instead of replaying visible generation.
-The caller must handle this failure; this does not implement Junie continuation.
-Validation errors and `response.incomplete` are forwarded without retries.
-
-This path needs a deployed gateway and tunnel smoke test before an evaluation;
-unit/integration tests with simulated workers do not establish Metal recovery.
-
-### Quota-6 TeamCity evaluation
-
-The existing parent job
-`Matterhorn_BenchmarksStaging_ExecutionsJbResearchPrivateSweBenchAllValidIdsWithoutSeedsErokhins2quota`
-uses `erokhins2_quota` (verified enabled with quota 6 on 2026-09-24).
-The suite's `max_parallel: 1` limits concurrent *cases*, not child task agents.
-Keep it at one for this single-model evaluation; do not change the shared quota.
-
-Use the previous `qwen-blend-splash-responses-20260924-full.json` contract in
-cai-llm-stack as the template, with a new run identity and the tested gateway
-endpoint. Keep `PRIMARY_MODEL_API=responses`, `PRIMARY_MODEL_STREAM=true`,
-reasoning low, temperature 1.0, the same 100 tasks and task limits. Pin the
-adapter commit in the run's serving provenance. Retain the source revisions
-unless deliberately testing a separate Junie change.
-
-For this evaluation explicitly configure gateway `request_timeout_s: 3600`
-and Splash `soft_request_timeout: 3600`; the gateway defaults are 275 and 270
-seconds and are inappropriate for this workload. Route ngrok to the gateway
-public port, not directly to Splash's worker port. Retain authentication via
-the existing protected local configuration; never put a key in the manifest.
-The existing unauthenticated evaluation contract requires a separately reviewed
-network/authentication setup if used with an authenticated gateway.
-
-Before launching, test the public Responses stream, delayed progress events,
-cancellation and recovery; verify model identity and that six callers can queue
-without error (the native runtime still has four active slots). In cai-llm-stack,
-commit the new manifest, run `bin/teamcity-evals preflight <manifest>`, then
-`bin/teamcity-evals launch-next <manifest> --confirm-serving-validated`.
-Do not reuse the old suite identity: its completed state belongs to the old run.
+Run the gateway, CLI, settings, Responses and Splash-worker tests. Before
+release, extract the actual archive and test MLX/Splash/MLX switching, tool
+calls and follow-ups, idle reload, both KV formats, cancellation, engine
+recovery and an unmodified Junie task. Unit tests do not establish Metal
+execution or long-context quality. Installer rollback and broad hardware,
+concurrency and long-session qualification remain separate release concerns.

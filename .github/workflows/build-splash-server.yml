@@ -1,4 +1,4 @@
-name: Build Splash engine preview
+name: Build MLX and Splash Nightly preview
 on:
   workflow_dispatch:
 jobs:
@@ -9,9 +9,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
       - name: Build pinned offline bundle
-        run: uv run --python 3.13 packaging/build_splash.py --output dist/junie-splash-macos-arm64.tar.gz
+        run: uv run --python 3.13 packaging/build_splash.py --output dist/junie-local-splash-preview-macos-arm64.tar.gz
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: junie-splash-macos-arm64
-          path: dist/junie-splash-macos-arm64.tar.gz
+          name: junie-local-splash-preview-macos-arm64
+          path: dist/junie-local-splash-preview-macos-arm64.tar.gz
           if-no-files-found: error
